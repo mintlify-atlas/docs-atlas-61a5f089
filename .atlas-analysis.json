@@ -1,0 +1,89 @@
+{
+  "projectType": "saas",
+  "projectName": "Kairo Learning Platform",
+  "projectDescription": "An AI-powered personalized learning platform for Riwi bootcamp that generates adaptive 4-week study plans based on academic performance and soft skills assessments.",
+  "theme": "almond",
+  "primaryColor": "#5B5BD6",
+  "lightColor": "#EEF2FF",
+  "darkColor": "#3730A3",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Overview",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "quickstart", "architecture"]
+          },
+          {
+            "group": "Setup",
+            "pages": ["setup/environment", "setup/backend-node", "setup/backend-python", "setup/database", "setup/frontend"]
+          }
+        ]
+      },
+      {
+        "tab": "Features",
+        "groups": [
+          {
+            "group": "For Coders",
+            "pages": ["features/onboarding", "features/learning-plan", "features/ai-tutor", "features/activity-tracking"]
+          },
+          {
+            "group": "For Team Leaders",
+            "pages": ["features/tl-dashboard", "features/risk-detection", "features/feedback", "features/ai-reports"]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Node.js API",
+            "pages": ["api/auth", "api/coder", "api/tl", "api/ai", "api/notifications"]
+          },
+          {
+            "group": "Python AI Service",
+            "pages": ["api/python/roadmap", "api/python/chat", "api/python/reports", "api/python/exercises"]
+          }
+        ]
+      },
+      {
+        "tab": "Database",
+        "groups": [
+          {
+            "group": "Schema",
+            "pages": ["database/overview", "database/schema", "database/migrations"]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "AI-generated personalized 4-week learning plans using Groq LLM",
+    "Soft skills assessment integrated into technical reinforcement",
+    "Team Leader analytics dashboard with at-risk student detection",
+    "Hybrid Node.js + FastAPI architecture for robust orchestration and AI processing",
+    "Social authentication (Google & GitHub OAuth)",
+    "Activity progress tracking with evidence submissions",
+    "AI chat tutor for real-time coding assistance",
+    "Automated risk flagging based on academic scores and soft skill metrics"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth/register",
+    "POST /api/auth/login",
+    "POST /api/auth/verify-otp",
+    "GET /api/auth/me",
+    "GET /api/auth/google",
+    "GET /api/auth/github",
+    "POST /api/ia/generate-plan",
+    "POST /api/ia/generate-focus-cards",
+    "POST /api/ia/generate-report",
+    "GET /api/tl/dashboard",
+    "POST /api/tl/feedback",
+    "GET /api/tl/ranking",
+    "POST /generate-plan (Python FastAPI)",
+    "POST /chat/ask (Python FastAPI)",
+    "GET /reports (Python FastAPI)",
+    "GET /exercises (Python FastAPI)"
+  ]
+}
