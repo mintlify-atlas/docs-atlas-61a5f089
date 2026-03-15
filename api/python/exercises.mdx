@@ -1,0 +1,339 @@
+---
+title: "Exercises and focus cards"
+description: "AI-generated coding exercises personalized per learning plan day, exercise submission, and focus card generation."
+---
+
+## POST /generate-exercise
+
+<Note>
+  Called by the Node.js server when a coder opens a plan day for the first time. On subsequent opens the cached exercise is returned without an LLM call.
+</Note>
+
+Generates a personalized coding exercise for a specific day of a learning plan, or returns the cached exercise if one already exists for that day. The `UNIQUE(plan_id, day_number)` constraint on the `exercises` table guarantees the same exercise is always returned for the same plan day.
+
+### Request body
+
+<ParamField body="coder_id" type="integer" required>
+  The coder's user ID from the `users` table.
+</ParamField>
+
+<ParamField body="plan_id" type="integer" required>
+  The learning plan ID from `complementary_plans`.
+</ParamField>
+
+<ParamField body="day_number" type="integer" required>
+  The plan day (1–20) for which to generate or retrieve the exercise.
+</ParamField>
+
+<ParamField body="week_number" type="integer" required>
+  The week number (1–4) the day belongs to. Used to give the LLM module progression context.
+</ParamField>
+
+<ParamField body="topic" type="string" required>
+  The technical topic for the exercise (e.g. `"INNER JOIN"`, `"Promesas en JavaScript"`).
+</ParamField>
+
+<ParamField body="description" type="string">
+  Additional description or context for the exercise. Defaults to `""`.
+</ParamField>
+
+<ParamField body="difficulty" type="string">
+  Difficulty level. Defaults to `"intermediate"`. The LLM uses this to calibrate the exercise complexity.
+</ParamField>
+
+<ParamField body="module_name" type="string">
+  The module name used to auto-detect the programming language when `language` is not provided. Defaults to `"Bases de Datos"`.
+</ParamField>
+
+<ParamField body="language" type="string">
+  The programming language for the exercise (e.g. `"sql"`, `"python"`, `"javascript"`, `"html"`). If omitted, the language is inferred from `module_name`.
+</ParamField>
+
+### Language detection
+
+When `language` is not provided, the service infers it from `module_name` using a keyword mapping. For example, module names containing `"datos"` or `"sql"` resolve to `"sql"`, names containing `"javascript"` or `"react"` resolve to `"javascript"`, and so on.
+
+### LLM configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Model | `MODEL_NAME` env var, default `llama-3.3-70b-versatile` |
+| `max_tokens` | `2048` |
+| `temperature` | `0.6` |
+| `response_format` | `{"type": "json_object"}` |
+
+The prompt is personalized using the coder's `learning_style` and soft skills profile fetched from `soft_skills_assessment`.
+
+### Response — 200 OK (generated)
+
+<ResponseField name="success" type="boolean">
+  `true` when generation succeeded. `false` when a fallback exercise was returned due to an LLM or parse error.
+</ResponseField>
+
+<ResponseField name="exercise" type="object">
+  The generated or cached exercise.
+  <Expandable title="properties">
+    <ResponseField name="id" type="integer">
+      Database ID from the `exercises` table. Present only on freshly generated exercises.
+    </ResponseField>
+    <ResponseField name="title" type="string">
+      Exercise title.
+    </ResponseField>
+    <ResponseField name="description" type="string">
+      Full exercise description with instructions.
+    </ResponseField>
+    <ResponseField name="language" type="string">
+      Programming language (`"sql"`, `"python"`, `"javascript"`, `"html"`).
+    </ResponseField>
+    <ResponseField name="difficulty" type="string">
+      Difficulty level (e.g. `"intermediate"`).
+    </ResponseField>
+    <ResponseField name="topic" type="string">
+      The topic the exercise covers.
+    </ResponseField>
+    <ResponseField name="starter_code" type="string">
+      Pre-filled code scaffold for the coder to complete.
+    </ResponseField>
+    <ResponseField name="solution" type="string">
+      Reference solution. Not shown to coders — available only to TLs.
+    </ResponseField>
+    <ResponseField name="expected_output" type="string">
+      Description of the expected result or output.
+    </ResponseField>
+    <ResponseField name="hints" type="array">
+      Array of hint strings to guide the coder without giving away the solution.
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      Present only on fallback exercises. Value: `"fallback"`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="cached" type="boolean">
+  `true` if the exercise was retrieved from the database cache. `false` if it was freshly generated.
+</ResponseField>
+
+### Fallback behavior
+
+If the Groq call fails or the response cannot be parsed as JSON, the endpoint returns `200` with `success: false` and a fallback exercise object containing language-appropriate starter code and a message directing the coder to their TL. The fallback is **not** saved to the database.
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/generate-exercise \
+  -H "Content-Type: application/json" \
+  -d '{
+    "coder_id": 42,
+    "plan_id": 187,
+    "day_number": 3,
+    "week_number": 1,
+    "topic": "INNER JOIN",
+    "difficulty": "intermediate",
+    "module_name": "Bases de Datos"
+  }'
+```
+
+```json
+{
+  "success": true,
+  "exercise": {
+    "id": 94,
+    "title": "Consulta de pedidos con INNER JOIN",
+    "description": "Escribe una consulta que liste el nombre del cliente y el total de su pedido uniendo las tablas customers y orders.",
+    "language": "sql",
+    "difficulty": "intermediate",
+    "topic": "INNER JOIN",
+    "starter_code": "SELECT \n  -- escribe tu consulta aquí\nFROM customers\n",
+    "solution": "SELECT c.name, SUM(o.total) FROM customers c INNER JOIN orders o ON c.id = o.customer_id GROUP BY c.name;",
+    "expected_output": "A result set with customer names and their order totals.",
+    "hints": [
+      "Use ON to specify the join condition between the two tables.",
+      "GROUP BY is needed if you want aggregated totals per customer."
+    ]
+  },
+  "cached": false
+}
+```
+
+---
+
+## POST /exercise/{exercise_id}/submit
+
+Saves a coder's code submission for a given exercise. No automatic grading is performed — the TL reviews submissions manually by querying `exercise_submissions JOIN exercises JOIN users`.
+
+### Path parameters
+
+<ParamField path="exercise_id" type="integer" required>
+  The exercise ID from the `exercises` table.
+</ParamField>
+
+### Request body
+
+<ParamField body="coder_id" type="integer" required>
+  The coder's user ID.
+</ParamField>
+
+<ParamField body="code" type="string" required>
+  The coder's submitted code. Cannot be empty or whitespace-only.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  `true` when the submission was saved.
+</ResponseField>
+
+<ResponseField name="submission_id" type="integer">
+  Database ID of the new row in `exercise_submissions`.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Confirmation message displayed to the coder. Fixed value: `"¡Solución enviada! Tu TL podrá revisar tu código."`
+</ResponseField>
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | `coder_id` is missing from the request body |
+| `400 Bad Request` | `code` is empty or whitespace-only |
+| `500 Internal Server Error` | Supabase insert failed |
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/exercise/94/submit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "coder_id": 42,
+    "code": "SELECT c.name, SUM(o.total) FROM customers c INNER JOIN orders o ON c.id = o.customer_id GROUP BY c.name;"
+  }'
+```
+
+```json
+{
+  "success": true,
+  "submission_id": 201,
+  "message": "¡Solución enviada! Tu TL podrá revisar tu código."
+}
+```
+
+---
+
+## POST /generate-focus-cards
+
+<Note>
+  Called by Node.js at `POST /api/ai/generate-focus-cards`. The Node.js server resolves the coder's current module and struggling topic IDs to names before forwarding the request.
+</Note>
+
+Generates 6 personalized focus cards for a coder's current module. The distribution is always exactly 2 HIGH, 2 MEDIUM, and 2 LOW priority cards. HIGH-priority cards target the coder's struggling topics directly.
+
+### Request body
+
+<ParamField body="coder_id" type="integer" required>
+  The coder's user ID. Used to fetch the soft skills profile for personalization.
+</ParamField>
+
+<ParamField body="module_id" type="integer" required>
+  The module ID. Used to fetch the module name and topic list.
+</ParamField>
+
+<ParamField body="struggling_topics" type="array">
+  List of topic names the coder is struggling with. HIGH-priority cards will target these topics. Defaults to `[]`.
+</ParamField>
+
+### LLM configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Model | `MODEL_NAME` env var, default `llama-3.3-70b-versatile` |
+| `max_tokens` | `2048` |
+| `temperature` | `0.7` |
+
+The prompt is built from the coder's `learning_style`, `problem_solving` score, `autonomy` score, the module name, up to 8 module topics, and the struggling topics list.
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  `true` on successful generation.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  Focus card data.
+  <Expandable title="properties">
+    <ResponseField name="cards" type="array">
+      Array of exactly 6 card objects (2 high, 2 medium, 2 low priority).
+      <Expandable title="card properties">
+        <ResponseField name="priority" type="string">
+          One of `"high"`, `"medium"`, or `"low"`.
+        </ResponseField>
+        <ResponseField name="topic" type="string">
+          The exact module topic name this card covers.
+        </ResponseField>
+        <ResponseField name="title" type="string">
+          Actionable card title.
+        </ResponseField>
+        <ResponseField name="theory" type="string">
+          3–4 sentence explanation adapted to the coder's learning style.
+        </ResponseField>
+        <ResponseField name="practice" type="object">
+          Practice task for the coder to complete in approximately 20 minutes.
+          <Expandable title="properties">
+            <ResponseField name="description" type="string">
+              What the coder should do.
+            </ResponseField>
+            <ResponseField name="example" type="string">
+              A code snippet or concrete step-by-step guide.
+            </ResponseField>
+          </Expandable>
+        </ResponseField>
+        <ResponseField name="pro_tips" type="array">
+          Array of 2 concise tip strings.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `500 Internal Server Error` | The LLM returned invalid JSON |
+| `500 Internal Server Error` | Groq API call failed |
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/generate-focus-cards \
+  -H "Content-Type: application/json" \
+  -d '{
+    "coder_id": 42,
+    "module_id": 3,
+    "struggling_topics": ["INNER JOIN", "Subconsultas"]
+  }'
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "cards": [
+      {
+        "priority": "high",
+        "topic": "INNER JOIN",
+        "title": "Domina INNER JOIN en 20 minutos",
+        "theory": "INNER JOIN combina filas de dos tablas donde la condición ON se cumple. Solo devuelve filas con coincidencia en ambas tablas. Es la base de casi todas las consultas relacionales.",
+        "practice": {
+          "description": "Escribe 3 consultas que unan customers con orders usando INNER JOIN.",
+          "example": "SELECT c.name, o.total\nFROM customers c\nINNER JOIN orders o ON c.id = o.customer_id;"
+        },
+        "pro_tips": [
+          "Siempre alias tus tablas para hacer las consultas más legibles.",
+          "Verifica que la columna de unión tenga índice para mejor rendimiento."
+        ]
+      }
+    ]
+  }
+}
+```

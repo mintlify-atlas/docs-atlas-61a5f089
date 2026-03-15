@@ -1,0 +1,464 @@
+---
+title: "Schema reference"
+description: "Complete reference for all tables, views, and enum types in the Kairo PostgreSQL database."
+---
+
+This page documents every table and view defined in `schema.sql` (version 3.0, March 2026). All tables use `SERIAL PRIMARY KEY` unless otherwise noted.
+
+<Info>
+  Never invent or modify table structures. The source of truth is `schema.sql` in the repository. This reference is generated from that file.
+</Info>
+
+## Tables
+
+<AccordionGroup>
+  <Accordion title="users">
+    **Purpose:** Root entity for all platform users — both coders and team leaders.
+
+    ```sql
+    COMMENT ON TABLE users IS 'Todos los usuarios del sistema (coders y team leaders)';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | Auto-incrementing user ID |
+    | `email` | `VARCHAR(100)` | `UNIQUE NOT NULL` | User login email |
+    | `password` | `VARCHAR(255)` | `NOT NULL` | Hashed password |
+    | `full_name` | `VARCHAR(150)` | `NOT NULL` | Display name |
+    | `role` | `role_enum` | `NOT NULL` | Either `coder` or `tl` |
+    | `clan_id` | `VARCHAR(50)` | — | Clan assignment: `Turing`, `Tesla`, or `McCarthy`. Allows TLs to filter by clan. |
+    | `first_login` | `BOOLEAN` | `DEFAULT TRUE` | `true` until the coder completes onboarding |
+    | `created_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Account creation time |
+
+    **Indexes:**
+    - `idx_users_email` on `email`
+    - `idx_users_role` on `role`
+    - `idx_users_clan_id` on `clan_id`
+
+    **Notes:** TL users have `clan_id = NULL`. The `first_login` flag drives the onboarding redirect on the frontend.
+  </Accordion>
+
+  <Accordion title="soft_skills_assessment">
+    **Purpose:** Stores the result of each coder's initial soft skills self-assessment, completed during onboarding. One record per coder.
+
+    ```sql
+    COMMENT ON TABLE soft_skills_assessment IS 'Evaluación inicial de habilidades blandas de cada coder';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | `NOT NULL UNIQUE` | References `users.id` (CASCADE delete) |
+    | `autonomy` | `INT` | `NOT NULL`, `BETWEEN 1 AND 5` | Autonomy score |
+    | `time_management` | `INT` | `NOT NULL`, `BETWEEN 1 AND 5` | Time management score |
+    | `problem_solving` | `INT` | `NOT NULL`, `BETWEEN 1 AND 5` | Problem solving score |
+    | `communication` | `INT` | `NOT NULL`, `BETWEEN 1 AND 5` | Communication score |
+    | `teamwork` | `INT` | `NOT NULL`, `BETWEEN 1 AND 5` | Teamwork score |
+    | `learning_style` | `learning_style_enum` | `NOT NULL` | Preferred learning style |
+    | `raw_answers` | `JSONB` | — | Full onboarding answers array `[{questionId, optionId, score}]` for audit and re-processing (added in migration 002) |
+    | `assessed_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | When the assessment was completed |
+
+    **Foreign keys:** `coder_id → users.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_soft_skills_coder` on `coder_id`
+  </Accordion>
+
+  <Accordion title="modules">
+    **Purpose:** Defines the academic modules that make up the Riwi bootcamp curriculum (e.g., Python Fundamentals, JavaScript, React).
+
+    ```sql
+    COMMENT ON TABLE modules IS 'Módulos académicos del bootcamp (Backend, Frontend, etc.)';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `name` | `VARCHAR(100)` | `NOT NULL` | Module name |
+    | `description` | `TEXT` | — | Module description |
+    | `total_weeks` | `INT` | `NOT NULL` | Total number of weeks in the module |
+    | `created_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | — |
+
+    **Notes:** Readable by all authenticated users. Only TLs can create or update modules.
+  </Accordion>
+
+  <Accordion title="moodle_progress">
+    **Purpose:** Tracks each coder's academic progress within a module, synced from (or mirroring) Moodle data.
+
+    ```sql
+    COMMENT ON TABLE moodle_progress IS 'Seguimiento del progreso académico en Moodle';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | `NOT NULL` | References `users.id` (CASCADE delete) |
+    | `module_id` | `INT` | `NOT NULL` | References `modules.id` (CASCADE delete) |
+    | `current_week` | `INT` | `NOT NULL` | The coder's current week within the module |
+    | `weeks_completed` | `JSONB` | `DEFAULT '[]'` | Array of completed week numbers, e.g., `[1, 2, 3]` |
+    | `struggling_topics` | `TEXT[]` | `DEFAULT '{}'` | Free-text array of self-reported struggling topic names |
+    | `average_score` | `DECIMAL(5,2)` | `DEFAULT 0` | Running average score across the module |
+    | `updated_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Last sync timestamp |
+
+    **Unique constraint:** `(coder_id, module_id)` — one progress record per coder per module.
+
+    **Foreign keys:**
+    - `coder_id → users.id ON DELETE CASCADE`
+    - `module_id → modules.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_moodle_coder` on `coder_id`
+    - `idx_moodle_score` on `average_score`
+  </Accordion>
+
+  <Accordion title="topics">
+    **Purpose:** Specific topics within each module. Used to tag areas where coders report difficulty.
+
+    ```sql
+    COMMENT ON TABLE topics IS 'Temas específicos dentro de cada módulo';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `module_id` | `INT` | `NOT NULL` | References `modules.id` (CASCADE delete) |
+    | `name` | `VARCHAR(200)` | `NOT NULL` | Topic name |
+    | `category` | `VARCHAR(100)` | — | Grouping label (e.g., `Conceptos`, `Avanzado`, `Layout`) |
+
+    **Foreign keys:** `module_id → modules.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_topics_module` on `module_id`
+    - `idx_topics_category` on `category`
+  </Accordion>
+
+  <Accordion title="coder_struggling_topics">
+    **Purpose:** N:M join table recording which topics each coder has flagged as difficult.
+
+    ```sql
+    COMMENT ON TABLE coder_struggling_topics IS 'Temas donde los coders reportan dificultad';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | `NOT NULL` | References `users.id` (CASCADE delete) |
+    | `topic_id` | `INT` | `NOT NULL` | References `topics.id` (CASCADE delete) |
+    | `reported_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | When the coder flagged this topic |
+
+    **Unique constraint:** `(coder_id, topic_id)` — a coder can only flag a topic once.
+
+    **Foreign keys:**
+    - `coder_id → users.id ON DELETE CASCADE`
+    - `topic_id → topics.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_struggling_coder` on `coder_id`
+  </Accordion>
+
+  <Accordion title="complementary_plans">
+    **Purpose:** AI-generated personalized study plans for coders — the "6 Cards" system. Each active coder has up to 6 plans: 2 high-priority, 2 medium-priority, and 2 low-priority.
+
+    ```sql
+    COMMENT ON TABLE complementary_plans IS 'Planes de estudio personalizados generados por IA (las 6 Cards)';
+    COMMENT ON COLUMN complementary_plans.priority_level IS '2 High, 2 Medium, 2 Low. Ordena las cards por importancia.';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | `NOT NULL` | References `users.id` (CASCADE delete) |
+    | `module_id` | `INT` | `NOT NULL` | References `modules.id` (CASCADE delete) |
+    | `plan_content` | `JSONB` | `NOT NULL` | Full AI-generated plan structure |
+    | `priority_level` | `priority_level_enum` | `DEFAULT 'medium'` | Card priority: `high`, `medium`, or `low` |
+    | `soft_skills_snapshot` | `JSONB` | — | Snapshot of the coder's soft skills at generation time |
+    | `moodle_status_snapshot` | `JSONB` | — | Snapshot of the coder's Moodle progress at generation time |
+    | `is_active` | `BOOLEAN` | `DEFAULT TRUE` | Only active plans are shown in the coder dashboard |
+    | `generated_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | When the AI generated the plan |
+
+    **Foreign keys:**
+    - `coder_id → users.id ON DELETE CASCADE`
+    - `module_id → modules.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_plans_coder` on `coder_id`
+    - `idx_plans_active` on `is_active`
+    - `idx_plans_priority` on `priority_level`
+
+    **Query tip:** To retrieve the 6 cards in display order:
+    ```sql
+    SELECT * FROM complementary_plans
+    WHERE coder_id = $1 AND is_active = true
+    ORDER BY priority_level DESC;
+    ```
+  </Accordion>
+
+  <Accordion title="plan_activities">
+    **Purpose:** Individual daily activities within a complementary plan. Each plan contains a sequence of day-numbered tasks.
+
+    ```sql
+    COMMENT ON TABLE plan_activities IS 'Actividades específicas dentro de cada plan';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `plan_id` | `INT` | `NOT NULL` | References `complementary_plans.id` (CASCADE delete) |
+    | `day_number` | `INT` | `NOT NULL` | Day within the plan (e.g., 1–28 for a 4-week plan) |
+    | `title` | `VARCHAR(200)` | `NOT NULL` | Short activity title |
+    | `description` | `TEXT` | — | Full activity instructions |
+    | `estimated_time_minutes` | `INT` | — | Estimated completion time |
+    | `activity_type` | `activity_type_enum` | — | `guided`, `semi_guided`, or `autonomous` |
+    | `skill_focus` | `VARCHAR(100)` | — | The soft or technical skill this activity targets |
+
+    **Foreign keys:** `plan_id → complementary_plans.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_activities_plan` on `plan_id`
+    - `idx_activities_day` on `day_number`
+  </Accordion>
+
+  <Accordion title="activity_progress">
+    **Purpose:** Tracks which activities each coder has completed, along with reflections and time spent.
+
+    ```sql
+    COMMENT ON TABLE activity_progress IS 'Seguimiento de qué actividades ha completado cada coder';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `activity_id` | `INT` | `NOT NULL` | References `plan_activities.id` (CASCADE delete) |
+    | `coder_id` | `INT` | `NOT NULL` | References `users.id` (CASCADE delete) |
+    | `completed` | `BOOLEAN` | `DEFAULT FALSE` | Whether the activity is marked done |
+    | `reflection_text` | `TEXT` | — | Optional coder reflection after completing the activity |
+    | `time_spent_minutes` | `INT` | — | Self-reported time spent |
+    | `completed_at` | `TIMESTAMP` | `NULL` | Timestamp when completion was recorded |
+
+    **Unique constraint:** `(activity_id, coder_id)` — one progress record per activity per coder.
+
+    **Foreign keys:**
+    - `activity_id → plan_activities.id ON DELETE CASCADE`
+    - `coder_id → users.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_progress_activity` on `activity_id`
+    - `idx_progress_coder` on `coder_id`
+    - `idx_progress_completed` on `completed`
+  </Accordion>
+
+  <Accordion title="evidence_submissions">
+    **Purpose:** Files and links that coders submit as evidence of completing an activity.
+
+    ```sql
+    COMMENT ON TABLE evidence_submissions IS 'Archivos y links de evidencia subidos por coders';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `activity_id` | `INT` | `NOT NULL` | References `plan_activities.id` (CASCADE delete) |
+    | `coder_id` | `INT` | `NOT NULL` | References `users.id` (CASCADE delete) |
+    | `file_url` | `TEXT` | — | URL to an uploaded file (e.g., Supabase Storage) |
+    | `link_url` | `TEXT` | — | External URL (e.g., GitHub repo, Loom video) |
+    | `description` | `TEXT` | — | Coder's description of the submitted evidence |
+    | `submitted_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Submission time |
+
+    **Foreign keys:**
+    - `activity_id → plan_activities.id ON DELETE CASCADE`
+    - `coder_id → users.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_evidence_activity` on `activity_id`
+    - `idx_evidence_coder` on `coder_id`
+  </Accordion>
+
+  <Accordion title="tl_feedback">
+    **Purpose:** Messages sent by Team Leaders to coders, with read-status tracking that drives the notification bell indicator.
+
+    ```sql
+    COMMENT ON TABLE tl_feedback IS 'Mensajes y retroalimentación del TL hacia los coders';
+    COMMENT ON COLUMN tl_feedback.is_read IS 'false = punto rojo en la campana de notificaciones';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | `NOT NULL` | The coder receiving the feedback. References `users.id` (CASCADE delete) |
+    | `tl_id` | `INT` | `NOT NULL` | The TL sending the feedback. References `users.id` (CASCADE delete) |
+    | `plan_id` | `INT` | — | Optional link to a specific plan. References `complementary_plans.id` (SET NULL on delete) |
+    | `feedback_text` | `TEXT` | `NOT NULL` | The feedback message body |
+    | `feedback_type` | `feedback_type_enum` | — | `weekly`, `activity`, or `general` |
+    | `is_read` | `BOOLEAN` | `DEFAULT FALSE` | `false` shows the red notification dot on the coder's bell icon |
+    | `created_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | When the feedback was sent |
+
+    **Foreign keys:**
+    - `coder_id → users.id ON DELETE CASCADE`
+    - `tl_id → users.id ON DELETE CASCADE`
+    - `plan_id → complementary_plans.id ON DELETE SET NULL`
+
+    **Indexes:**
+    - `idx_feedback_coder` on `coder_id`
+    - `idx_feedback_tl` on `tl_id`
+    - `idx_feedback_is_read` on `is_read`
+    - `idx_feedback_coder_unread` on `(coder_id, is_read)` — optimizes unread notification queries
+
+    **Notification flow:**
+    1. TL creates a row with `is_read = false`
+    2. Frontend shows red dot on the notification bell
+    3. Coder opens the message — frontend sets `is_read = true`
+    4. Red dot disappears
+  </Accordion>
+
+  <Accordion title="risk_flags">
+    **Purpose:** Automatic risk alerts generated by the AI risk detector agent. Flags coders whose metrics suggest academic or engagement risk.
+
+    ```sql
+    COMMENT ON TABLE risk_flags IS 'Alertas automáticas para coders en riesgo (bajo score, baja autonomía, etc.)';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | `NOT NULL` | References `users.id` (CASCADE delete) |
+    | `risk_level` | `risk_level_enum` | `NOT NULL` | `low`, `medium`, or `high` |
+    | `reason` | `TEXT` | `NOT NULL` | Human-readable explanation of why the alert was raised |
+    | `auto_detected` | `BOOLEAN` | `DEFAULT TRUE` | `true` if generated by the AI agent; `false` if manually raised by a TL |
+    | `detected_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | When the flag was created |
+    | `resolved` | `BOOLEAN` | `DEFAULT FALSE` | `true` once the TL marks the situation as resolved |
+    | `resolved_at` | `TIMESTAMP` | `NULL` | When the flag was resolved |
+
+    **Foreign keys:** `coder_id → users.id ON DELETE CASCADE`
+
+    **Indexes:**
+    - `idx_risk_coder` on `coder_id`
+    - `idx_risk_level` on `risk_level`
+    - `idx_risk_resolved` on `resolved`
+  </Accordion>
+
+  <Accordion title="ai_reports">
+    **Purpose:** Executive-level summaries generated by the AI report generator agent, visible only to Team Leaders. Reports can target an individual coder, a clan, or an entire cohort.
+
+    ```sql
+    COMMENT ON TABLE ai_reports IS 'Reportes ejecutivos para Team Leaders generados por IA';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `target_type` | `report_target_enum` | `NOT NULL` | Scope of the report: `coder`, `clan`, or `cohort` |
+    | `target_id` | `INT` | `NOT NULL` | The ID of the target (user ID for `coder`; semantic ID for `clan`/`cohort`) |
+    | `summary_text` | `TEXT` | `NOT NULL` | AI-generated summary narrative |
+    | `risk_level` | `risk_level_enum` | — | Overall risk assessment for the target |
+    | `recommendations` | `TEXT` | — | AI-generated action recommendations for the TL |
+    | `generated_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | When the report was generated |
+    | `viewed_by_tl` | `BOOLEAN` | `DEFAULT FALSE` | Tracks whether the TL has opened the report |
+
+    **Indexes:**
+    - `idx_reports_target` on `(target_type, target_id)`
+    - `idx_reports_viewed` on `viewed_by_tl`
+
+    <Note>
+      `ai_reports` has no `coder_id` foreign key. TL-only RLS policy ensures coders can never access this table.
+    </Note>
+  </Accordion>
+
+  <Accordion title="ai_generation_log">
+    **Purpose:** Full audit log of every AI agent invocation. Stores both the input payload sent to the AI and the output received, along with timing and error information.
+
+    ```sql
+    COMMENT ON TABLE ai_generation_log IS 'Registro completo de todas las llamadas a IA (para auditoría)';
+    ```
+
+    | Column | Type | Constraints | Description |
+    |---|---|---|---|
+    | `id` | `SERIAL` | `PRIMARY KEY` | — |
+    | `coder_id` | `INT` | — | The coder the AI call was made for, if applicable. References `users.id` (SET NULL on delete) |
+    | `agent_type` | `ai_agent_enum` | `NOT NULL` | Which AI agent was invoked: `learning_plan`, `report_generator`, or `risk_detector` |
+    | `input_payload` | `JSONB` | `NOT NULL` | The full data sent to the AI agent |
+    | `output_payload` | `JSONB` | `NOT NULL` | The full response received from the AI agent |
+    | `model_name` | `VARCHAR(100)` | — | The LLM model used (e.g., `llama-3.3-70b-versatile`) |
+    | `execution_time_ms` | `INT` | — | Total round-trip time in milliseconds |
+    | `success` | `BOOLEAN` | `DEFAULT TRUE` | `false` if the agent call failed |
+    | `error_message` | `TEXT` | — | Error details when `success = false` |
+    | `generated_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Invocation timestamp |
+
+    **Foreign keys:** `coder_id → users.id ON DELETE SET NULL`
+
+    **Indexes:**
+    - `idx_log_agent` on `agent_type`
+    - `idx_log_coder` on `coder_id`
+    - `idx_log_date` on `generated_at`
+  </Accordion>
+</AccordionGroup>
+
+## Views
+
+<AccordionGroup>
+  <Accordion title="v_coder_dashboard">
+    **Purpose:** Aggregated summary of each coder's progress, designed for the coder-facing dashboard. Returns one row per coder per active module.
+
+    ```sql
+    COMMENT ON VIEW v_coder_dashboard IS 'Resumen del progreso de cada coder para su dashboard';
+    ```
+
+    **Columns returned:**
+
+    | Column | Source | Description |
+    |---|---|---|
+    | `id` | `users.id` | Coder ID |
+    | `email` | `users.email` | Coder email |
+    | `full_name` | `users.full_name` | Coder display name |
+    | `clan_id` | `users.clan_id` | Clan assignment |
+    | `autonomy` | `soft_skills_assessment.autonomy` | Autonomy score (1–5) |
+    | `time_management` | `soft_skills_assessment.time_management` | Time management score (1–5) |
+    | `learning_style` | `soft_skills_assessment.learning_style` | Preferred learning style |
+    | `module_name` | `modules.name` | Current module name |
+    | `current_week` | `moodle_progress.current_week` | Current week in the module |
+    | `average_score` | `moodle_progress.average_score` | Running average module score |
+    | `total_activities` | computed | Count of distinct activities across active plans |
+    | `completed_activities` | computed | Count of completed activities |
+    | `completion_percentage` | computed | `(completed / total) * 100`, rounded to 2 decimal places |
+
+    **Filter:** `WHERE users.role = 'coder'` — TL accounts are excluded from this view.
+
+    ```sql
+    -- Example: get dashboard data for a single coder
+    SELECT * FROM v_coder_dashboard WHERE id = $1;
+    ```
+  </Accordion>
+
+  <Accordion title="v_coder_risk_analysis">
+    **Purpose:** Risk analysis view used by Team Leaders to identify at-risk coders. Compares soft skills scores against academic performance and provides both the stored risk level and an AI-calculated risk classification.
+
+    ```sql
+    COMMENT ON VIEW v_coder_risk_analysis IS 'Análisis de riesgo de cada coder para el TL';
+    ```
+
+    **Columns returned:**
+
+    | Column | Source | Description |
+    |---|---|---|
+    | `id` | `users.id` | Coder ID |
+    | `email` | `users.email` | Coder email |
+    | `full_name` | `users.full_name` | Coder display name |
+    | `autonomy` | `soft_skills_assessment.autonomy` | Autonomy score |
+    | `time_management` | `soft_skills_assessment.time_management` | Time management score |
+    | `average_score` | `moodle_progress.average_score` | Module average score |
+    | `current_risk_level` | `risk_flags.risk_level` | Most recent unresolved risk flag level (`low` if none) |
+    | `calculated_risk_level` | computed | Rule-based risk: `high` if autonomy ≤ 2 AND score < 70; `medium` if either condition; `low` otherwise |
+    | `total_activities` | computed | Count of distinct activities |
+    | `completed_activities` | computed | Count of completed activities |
+
+    **Filter:** `WHERE users.role = 'coder'` and only unresolved risk flags (`rf.resolved = FALSE`).
+
+    **Risk calculation logic:**
+    ```sql
+    CASE
+      WHEN ssa.autonomy <= 2 AND mp.average_score < 70 THEN 'high'
+      WHEN ssa.autonomy <= 2 OR  mp.average_score < 70 THEN 'medium'
+      ELSE 'low'
+    END AS calculated_risk_level
+    ```
+  </Accordion>
+</AccordionGroup>

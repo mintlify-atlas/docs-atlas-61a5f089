@@ -1,0 +1,65 @@
+---
+title: "Kairo Learning Platform"
+description: "An AI-powered personalized learning platform for Riwi bootcamp coders."
+---
+
+## What is Kairo?
+
+Kairo is an intelligent learning ecosystem built for [Riwi](https://riwi.io)'s intensive 11-month coding bootcamp. It bridges the gap between the bootcamp's fast-paced curriculum and each student's individual learning pace by leveraging AI to generate adaptive study plans.
+
+At its core, Kairo analyzes a coder's academic performance (from Moodle) and their soft skills assessment to build a personalized **4-week growth path** — one that adapts to the human, not just the code.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get both backend engines running in under 10 minutes
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand the hybrid Node.js + Python architecture
+  </Card>
+  <Card title="For Coders" icon="graduation-cap" href="/features/onboarding">
+    Learn how coders get personalized learning plans
+  </Card>
+  <Card title="For Team Leaders" icon="chart-line" href="/features/tl-dashboard">
+    Explore the TL analytics dashboard
+  </Card>
+</CardGroup>
+
+## Key pillars
+
+<CardGroup cols={2}>
+  <Card title="Adaptive Learning" icon="brain">
+    Generates custom 4-week study plans based on Moodle data and self-assessments. Each plan contains 6 prioritized cards (2 High, 2 Medium, 2 Low) with daily activities.
+  </Card>
+  <Card title="Holistic Growth" icon="heart">
+    Integrates soft skills — emotional intelligence, communication, autonomy — directly into technical reinforcement tasks.
+  </Card>
+  <Card title="Proactive Mentorship" icon="bell">
+    Provides Team Leaders with a real-time analytics dashboard to identify at-risk students before academic failure occurs.
+  </Card>
+  <Card title="Hybrid Intelligence" icon="microchip">
+    Node.js handles orchestration and business logic; Python/FastAPI + Groq LLM handles AI inference and predictive analytics.
+  </Card>
+</CardGroup>
+
+## Tech stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | HTML5, CSS3, Vanilla JavaScript, Bootstrap 5 |
+| Backend Orchestrator | Node.js + Express.js |
+| AI Microservice | Python + FastAPI |
+| AI Model | Groq (llama-3.3-70b-versatile / Qwen2.5-7B-Instruct) |
+| LLM Orchestration | LangChain |
+| Database | PostgreSQL (Supabase) |
+| Auth | Passport.js (Google OAuth, GitHub OAuth, local) |
+
+## User roles
+
+Kairo has two primary user roles:
+
+- **Coder** — A bootcamp student who receives personalized learning plans, tracks activity progress, and can chat with the AI tutor.
+- **Team Leader (TL)** — A mentor who monitors coder progress, reviews evidence submissions, sends feedback, and generates AI-powered analytics reports.
+
+<Note>
+  Both backends must be running simultaneously for full functionality. The Node.js server is the system orchestrator; the Python service is the AI brain.
+</Note>

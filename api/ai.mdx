@@ -1,0 +1,186 @@
+---
+title: "AI API"
+description: "Node.js proxy endpoints to the Python FastAPI AI service for plan generation, focus cards, TL reports, and health checks."
+---
+
+<Info>
+  All endpoints in this group require authentication (`isAuthenticated` middleware). Role restrictions are applied per endpoint. These routes act as a Node.js proxy: the Node server enriches the request with database context before forwarding it to the Python FastAPI service.
+</Info>
+
+<Note>
+  The AI service is mounted at `/api/ai` in the Node.js server. The internal Python service runs at `PYTHON_API_URL` (default: `http://localhost:8000`).
+</Note>
+
+## POST /api/ai/generate-plan
+
+<Info>Requires authentication — role: `coder`</Info>
+
+Generates a personalized 20-day complementary learning plan for the authenticated coder. Node.js fetches the coder's current module and struggling topics from the database, then forwards a slim payload to the Python service which performs the full AI generation.
+
+The response includes the generated plan and metadata from the AI service.
+
+**Request body**
+
+<ParamField body="topic" type="string">
+  Override the default topic label used for plan generation. Defaults to `"Módulo {moduleId} — Semana {currentWeek}"` if not provided.
+</ParamField>
+
+<ParamField body="additionalTopics" type="array">
+  Array of additional topic strings to include in the generation context. Defaults to `[]`.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on successful generation.
+</ResponseField>
+
+<ResponseField name="plan" type="object">
+  The AI-generated plan object. Structure is defined by the Python AI service.
+</ResponseField>
+
+<ResponseField name="metadata" type="object">
+  Generation metadata from the Python service.
+  <Expandable title="properties">
+    <ResponseField name="plan_id" type="number | null">Database ID of the persisted plan, if saved.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `403 Forbidden` | Authenticated user is not a `coder` |
+| `502 Bad Gateway` | Python AI service is unavailable or returned an error |
+| `500 Internal Server Error` | Unexpected Node.js error |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/ai/generate-plan \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"topic": "Promises and async/await", "additionalTopics": ["error handling"]}'
+```
+
+---
+
+## POST /api/ai/generate-focus-cards
+
+<Info>Requires authentication — role: `coder`</Info>
+
+Generates AI flashcard-style focus cards based on the coder's current module and struggling topics. Node.js resolves the topic IDs to names before forwarding to the Python service.
+
+**Request body**
+
+No request body required. The Node.js server automatically uses the coder's current Moodle progress to build the payload.
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  Focus card data as returned by the Python service.
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `403 Forbidden` | Authenticated user is not a `coder` |
+| `502 Bad Gateway` | Python AI service unavailable |
+| `500 Internal Server Error` | Unexpected Node.js error |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/ai/generate-focus-cards \
+  -b cookies.txt
+```
+
+---
+
+## POST /api/ai/generate-report
+
+<Info>Requires authentication — role: `tl`</Info>
+
+Generates an AI summary report for the TL's clan. Node.js fetches clan membership, average Moodle scores, and active high/critical risk flag counts, then forwards an aggregated payload to the Python service.
+
+**Request body**
+
+No request body required. The Node.js server automatically collects clan data from the database.
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="report" type="object">
+  AI-generated report as returned by the Python service.
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | TL has no clan assigned |
+| `401 Unauthorized` | No active session |
+| `403 Forbidden` | Authenticated user is not a `tl` |
+| `500 Internal Server Error` | Python service error or unexpected Node.js error |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/ai/generate-report \
+  -b cookies.txt
+```
+
+---
+
+## GET /api/ai/health
+
+<Info>Requires authentication</Info>
+
+Checks the health of both the Node.js API and the Python AI service. Useful for monitoring and debugging connectivity between the two services.
+
+**Response — 200 OK**
+
+<ResponseField name="node" type="string">
+  Always `"ok"` when this endpoint responds.
+</ResponseField>
+
+<ResponseField name="python" type="object">
+  Health response from the Python service as returned by `GET {PYTHON_API_URL}/health`.
+</ResponseField>
+
+**Response — 503 Service Unavailable**
+
+<ResponseField name="node" type="string">
+  `"ok"` — the Node server is running.
+</ResponseField>
+
+<ResponseField name="python" type="string">
+  `"unreachable"`
+</ResponseField>
+
+<ResponseField name="error" type="string">
+  Error message from the failed connection attempt.
+</ResponseField>
+
+**Example**
+
+```bash
+curl http://localhost:3000/api/ai/health -b cookies.txt
+```
+
+```json
+{
+  "node": "ok",
+  "python": { "status": "healthy", "model": "llama-3.3-70b-versatile" }
+}
+```

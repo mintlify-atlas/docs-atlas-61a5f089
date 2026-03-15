@@ -1,0 +1,293 @@
+---
+title: "Database"
+description: "PostgreSQL and Supabase setup, schema reference, and seed data for Kairo."
+---
+
+Kairo uses PostgreSQL 14+ hosted on [Supabase](https://supabase.com). The database schema is defined in `database/schema.sql` and includes 14 tables, 8 enum types, and 2 views. Row Level Security (RLS) is applied via `database/rls_policies.sql`.
+
+## Supabase project setup
+
+<Steps>
+  <Step title="Create a Supabase project">
+    1. Sign in at [supabase.com](https://supabase.com) and click **New project**.
+    2. Choose a name, region, and database password.
+    3. Wait for the project to finish provisioning (about 2 minutes).
+  </Step>
+  <Step title="Collect your credentials">
+    Navigate to **Project Settings → API** and copy:
+
+    - **Project URL** → `SUPABASE_URL`
+    - **anon / public key** → `SUPABASE_ANON_KEY`
+    - **service_role key** → `SUPABASE_SERVICE_KEY`
+
+    Navigate to **Project Settings → Database** and copy the connection string for the **Transaction pooler** → `DATABASE_URL`.
+
+    <Warning>
+      Use the **Transaction pooler** connection string (not the direct connection string) when connecting from serverless or long-running Node.js processes. The pooler hostname format is `aws-1-us-east-1.pooler.supabase.com` and the user format is `postgres.YOUR_PROJECT_ID`.
+    </Warning>
+  </Step>
+  <Step title="Run the schema">
+    In the Supabase dashboard, go to **SQL Editor** and paste the full contents of `database/schema.sql`, then click **Run**.
+
+    Alternatively, run it from the terminal:
+
+    ```bash
+    psql -U postgres.your_project_id \
+         -h aws-1-us-east-1.pooler.supabase.com \
+         -d postgres \
+         -f database/schema.sql
+    ```
+  </Step>
+  <Step title="Apply Row Level Security policies">
+    In the **SQL Editor**, paste and run the contents of `database/rls_policies.sql`.
+
+    ```bash
+    psql -U postgres.your_project_id \
+         -h aws-1-us-east-1.pooler.supabase.com \
+         -d postgres \
+         -f database/rls_policies.sql
+    ```
+  </Step>
+  <Step title="Run migrations (optional)">
+    If you need the `clan_id`, 6-card priority system, or notification features, apply the migration:
+
+    ```bash
+    psql -U postgres.your_project_id \
+         -h aws-1-us-east-1.pooler.supabase.com \
+         -d postgres \
+         -f database/migrations/001_add_clans_and_priority_and_notifications.sql
+    ```
+  </Step>
+  <Step title="Load seed data (development only)">
+    To populate the database with test users and academic data:
+
+    ```bash
+    psql -U postgres.your_project_id \
+         -h aws-1-us-east-1.pooler.supabase.com \
+         -d postgres \
+         -f database/seeds/users.sql
+    ```
+
+    <Warning>
+      Only run seeds against a development database. The seed script inserts plain-text passwords for convenience. These are not safe for production.
+    </Warning>
+  </Step>
+</Steps>
+
+## Enum types
+
+The schema defines 8 PostgreSQL `ENUM` types that enforce valid values at the database level:
+
+| Enum | Values | Used in |
+|------|--------|---------|
+| `role_enum` | `coder`, `tl` | `users.role` |
+| `learning_style_enum` | `visual`, `auditory`, `kinesthetic`, `mixed` | `soft_skills_assessment.learning_style` |
+| `activity_type_enum` | `guided`, `semi_guided`, `autonomous` | `plan_activities.activity_type` |
+| `feedback_type_enum` | `weekly`, `activity`, `general` | `tl_feedback.feedback_type` |
+| `risk_level_enum` | `low`, `medium`, `high` | `risk_flags.risk_level`, `ai_reports.risk_level` |
+| `report_target_enum` | `coder`, `clan`, `cohort` | `ai_reports.target_type` |
+| `ai_agent_enum` | `learning_plan`, `report_generator`, `risk_detector` | `ai_generation_log.agent_type` |
+| `priority_level_enum` | `low`, `medium`, `high` | `complementary_plans.priority_level` |
+
+## Table overview
+
+<AccordionGroup>
+  <Accordion title="users">
+    Stores all platform users — both Coders and Team Leaders.
+
+    | Column | Type | Notes |
+    |--------|------|-------|
+    | `id` | `SERIAL` | Primary key |
+    | `email` | `VARCHAR(100)` | Unique, used for login |
+    | `password` | `VARCHAR(255)` | Bcrypt hash |
+    | `full_name` | `VARCHAR(150)` | Display name |
+    | `role` | `role_enum` | `coder` or `tl` |
+    | `clan_id` | `VARCHAR(50)` | Clan assignment: `Turing`, `Tesla`, or `McCarthy` |
+    | `first_login` | `BOOLEAN` | `true` until onboarding is complete |
+    | `created_at` | `TIMESTAMP` | Auto-set on insert |
+
+    Indexed by: `email`, `role`, `clan_id`.
+  </Accordion>
+  <Accordion title="soft_skills_assessment">
+    Stores each coder's initial soft skills self-assessment. One record per coder.
+
+    | Column | Type | Notes |
+    |--------|------|-------|
+    | `autonomy` | `INT` | Score 1–5 |
+    | `time_management` | `INT` | Score 1–5 |
+    | `problem_solving` | `INT` | Score 1–5 |
+    | `communication` | `INT` | Score 1–5 |
+    | `teamwork` | `INT` | Score 1–5 |
+    | `learning_style` | `learning_style_enum` | Self-identified learning style |
+    | `raw_answers` | `JSONB` | Full questionnaire response payload |
+  </Accordion>
+  <Accordion title="modules">
+    Defines the bootcamp modules (e.g., Python Fundamentals, JavaScript, Backend with Node.js). Readable by all users; only TLs can create or edit.
+  </Accordion>
+  <Accordion title="moodle_progress">
+    Tracks each coder's academic progress per module: current week, completed weeks (JSONB array), struggling topics (text array), and average score. One record per (coder, module) pair.
+  </Accordion>
+  <Accordion title="topics">
+    Individual topics within each module (e.g., "Variables y tipos", "Async/Await"). Readable by all users.
+  </Accordion>
+  <Accordion title="coder_struggling_topics">
+    Many-to-many join table linking coders to topics they are struggling with. Coders manage their own entries.
+  </Accordion>
+  <Accordion title="complementary_plans">
+    The AI-generated personalized study plans — the **6 Cards**. Each plan has a `priority_level` (`high`, `medium`, or `low`). The AI generates 2 of each priority level per coder per module. Snapshots of the coder's soft skills and Moodle status at generation time are stored as JSONB.
+  </Accordion>
+  <Accordion title="plan_activities">
+    Daily activities within each complementary plan. Each activity has an `activity_type` (`guided`, `semi_guided`, or `autonomous`) and an estimated time in minutes.
+  </Accordion>
+  <Accordion title="activity_progress">
+    Tracks which activities each coder has completed, along with optional reflection text and time spent. One record per (activity, coder) pair.
+  </Accordion>
+  <Accordion title="evidence_submissions">
+    Files and links uploaded by coders as evidence of completing an activity. Supports both a `file_url` and a `link_url` per submission.
+  </Accordion>
+  <Accordion title="tl_feedback">
+    Messages sent by Team Leaders to coders. The `is_read` boolean drives the notification bell indicator — `false` shows a red dot, `true` clears it. Coders can only mark messages as read; they cannot delete them.
+  </Accordion>
+  <Accordion title="risk_flags">
+    Automatic or manual risk alerts for coders. Flags are associated with a `risk_level` and a `reason` text. Resolved flags set `resolved = true` and record a `resolved_at` timestamp.
+  </Accordion>
+  <Accordion title="ai_reports">
+    Executive summary reports generated by the AI for Team Leaders. Reports can target an individual coder, a clan, or a full cohort (`report_target_enum`).
+  </Accordion>
+  <Accordion title="ai_generation_log">
+    Audit log of every AI generation call. Stores the input payload, output payload, model name, execution time in milliseconds, and success status. TL-only access in production.
+  </Accordion>
+</AccordionGroup>
+
+## Views
+
+Two SQL views aggregate data for the application dashboards:
+
+### v_coder_dashboard
+
+Aggregates per-coder progress data in a single query:
+
+- Soft skills scores (autonomy, time management, learning style)
+- Current module, week number, and average score
+- Total activities and completed activities count
+- Completion percentage (rounded to 2 decimal places)
+
+### v_coder_risk_analysis
+
+Provides risk analysis data for the TL dashboard:
+
+- Soft skills and Moodle score per coder
+- Current unresolved risk level from `risk_flags`
+- Calculated risk level from business rules:
+  - `autonomy <= 2` **and** `average_score < 70` → `high`
+  - `autonomy <= 2` **or** `average_score < 70` → `medium`
+  - Otherwise → `low`
+- Activity completion statistics
+
+## Row Level Security
+
+RLS is enabled on all 14 tables. The policies enforce two access patterns:
+
+| Actor | Access |
+|-------|--------|
+| **Coder** | Can only read and modify their own rows (matched by `auth.uid()`) |
+| **Team Leader** | Can read all rows; can create and edit plans, activities, feedback, and modules |
+
+Key policy highlights:
+
+- Coders can mark `tl_feedback.is_read = true` (to dismiss notifications) but cannot delete messages
+- Only TLs can insert into `complementary_plans` and `plan_activities`
+- `modules` and `topics` are readable by everyone but only writable by TLs
+- `ai_reports` and `ai_generation_log` are TL-only
+
+<Warning>
+  The Node.js and Python backends connect using the **service role key**, which bypasses all RLS policies. RLS only applies to direct Supabase client connections that use the anon key or a user JWT.
+</Warning>
+
+## Connecting from Node.js
+
+The Node.js backend uses two separate connection mechanisms:
+
+**`pg` connection pool** (for direct SQL queries and the session store):
+
+```javascript
+// src/config/database.js
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // required for Supabase
+  max: 10,
+  idleTimeoutMillis: 30000,
+});
+```
+
+**Supabase JS client** (for RLS-aware operations and storage):
+
+```javascript
+// src/config/supabase.js
+import { createClient } from '@supabase/supabase-js';
+export const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+```
+
+## Connecting from Python
+
+The Python service connects using the `supabase` Python client with the service role key:
+
+```python
+from supabase import create_client
+
+client = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_SERVICE_KEY")
+)
+```
+
+## Seed data
+
+The seed file `database/seeds/users.sql` creates 8 test users across 3 clans, along with assessments, modules, topics, and academic progress records:
+
+| User | Role | Clan | Autonomy | Avg score | Scenario |
+|------|------|------|----------|-----------|----------|
+| María García | TL | — | — | — | Team Leader A |
+| Carlos Rodríguez | TL | — | — | — | Team Leader B |
+| Juan Pérez | Coder | Turing | 2 | 65.5 | At-risk: low autonomy |
+| Ana López | Coder | Turing | 4 | 88.0 | Balanced, performing well |
+| Pedro Martínez | Coder | Tesla | 3 | 72.0 | Low time management |
+| Sofía Hernández | Coder | Tesla | 5 | 95.0 | High performer |
+| Luis González | Coder | McCarthy | 2 | 58.0 | High risk: low autonomy + low score |
+| María Sánchez | Coder | McCarthy | 3 | — | Baseline case |
+
+To verify the seed was applied:
+
+```sql
+SELECT COUNT(*) FROM users;                   -- Should be 8
+SELECT COUNT(*) FROM modules;                 -- Should be 6
+SELECT COUNT(*) FROM soft_skills_assessment;  -- Should be 6
+```
+
+## Resetting the database
+
+<Warning>
+  The following command deletes all data. Only run this in a development environment.
+</Warning>
+
+```sql
+TRUNCATE TABLE ai_generation_log CASCADE;
+TRUNCATE TABLE ai_reports CASCADE;
+TRUNCATE TABLE risk_flags CASCADE;
+TRUNCATE TABLE evidence_submissions CASCADE;
+TRUNCATE TABLE tl_feedback CASCADE;
+TRUNCATE TABLE activity_progress CASCADE;
+TRUNCATE TABLE plan_activities CASCADE;
+TRUNCATE TABLE complementary_plans CASCADE;
+TRUNCATE TABLE coder_struggling_topics CASCADE;
+TRUNCATE TABLE topics CASCADE;
+TRUNCATE TABLE moodle_progress CASCADE;
+TRUNCATE TABLE modules CASCADE;
+TRUNCATE TABLE soft_skills_assessment CASCADE;
+TRUNCATE TABLE users RESTART IDENTITY CASCADE;
+```
+
+After resetting, re-run `database/seeds/users.sql` to restore test data.

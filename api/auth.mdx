@@ -1,0 +1,439 @@
+---
+title: "Authentication API"
+description: "User registration, OTP verification, login, social OAuth, and session management endpoints."
+---
+
+<Info>
+  All authenticated endpoints require a valid session cookie (`riwi.sid`). Sessions are established via `/api/auth/login`, `/api/auth/verify-otp`, or social OAuth flows. The session cookie is `HttpOnly` and `SameSite: lax` in development, `SameSite: none; Secure` in production.
+</Info>
+
+## POST /api/auth/register
+
+<Note>Public endpoint — no authentication required</Note>
+
+Registers a new user account. If the email is not yet in the database, a new record is created with `otp_verified = false`. A 6-digit OTP is sent to the provided email immediately after. The OTP expires in **15 minutes**.
+
+If the user already exists but has not yet verified their email, the previous OTP is invalidated and a fresh one is sent.
+
+**Request body**
+
+<ParamField body="email" type="string" required>
+  The user's email address. Must be unique among verified accounts.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Plain-text password. Hashed with bcrypt (12 salt rounds) before storage.
+</ParamField>
+
+<ParamField body="fullName" type="string" required>
+  The user's full display name.
+</ParamField>
+
+<ParamField body="role" type="string">
+  Account role. Accepted values: `coder`, `tl`. Defaults to `coder` if omitted.
+</ParamField>
+
+<ParamField body="clanId" type="string">
+  Optional clan identifier to associate with the new account.
+</ParamField>
+
+**Response — 201 Created**
+
+<ResponseField name="message" type="string">
+  Human-readable status message, e.g. `"Verification code sent."`
+</ResponseField>
+
+<ResponseField name="email" type="string">
+  The email address the OTP was sent to.
+</ResponseField>
+
+<ResponseField name="ttl" type="number">
+  OTP time-to-live in seconds (900).
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `409 Conflict` | Email is already registered and verified |
+| `500 Internal Server Error` | Registration process failed |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "coder@riwi.io", "password": "secret123", "fullName": "Ana García", "role": "coder"}'
+```
+
+---
+
+## POST /api/auth/verify-otp
+
+<Note>Public endpoint — no authentication required</Note>
+
+Verifies the OTP sent during registration. On success, marks the user as verified, creates a session, and returns user data. Previous unused OTPs for the same email are invalidated after a successful verification.
+
+**Request body**
+
+<ParamField body="email" type="string" required>
+  The email address the OTP was sent to.
+</ParamField>
+
+<ParamField body="code" type="string" required>
+  The 6-digit verification code from the email.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on successful verification.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  Verified user data.
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">User ID.</ResponseField>
+    <ResponseField name="fullName" type="string">Full display name.</ResponseField>
+    <ResponseField name="role" type="string">Account role (`coder` or `tl`).</ResponseField>
+    <ResponseField name="clanId" type="string | null">Assigned clan identifier.</ResponseField>
+    <ResponseField name="firstLogin" type="boolean">`true` if the user has not yet completed onboarding.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | Code is invalid, already used, or expired |
+| `500 Internal Server Error` | Session initialization or server error |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/auth/verify-otp \
+  -H "Content-Type: application/json" \
+  -d '{"email": "coder@riwi.io", "code": "482910"}'
+```
+
+---
+
+## POST /api/auth/resend-otp
+
+<Note>Public endpoint — no authentication required</Note>
+
+Resends a new OTP to an unverified email. Any previous unused OTPs for that email are invalidated first. Returns an error if the email is already verified.
+
+**Request body**
+
+<ParamField body="email" type="string" required>
+  The email address to resend the OTP to.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` when the new code was sent.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  `"A new verification code has been sent."`
+</ResponseField>
+
+<ResponseField name="ttl" type="number">
+  New OTP time-to-live in seconds (900).
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | `email` field missing, or email is already verified |
+| `404 Not Found` | No user with that email exists |
+| `500 Internal Server Error` | Failed to send the email |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/auth/resend-otp \
+  -H "Content-Type: application/json" \
+  -d '{"email": "coder@riwi.io"}'
+```
+
+---
+
+## POST /api/auth/login
+
+<Note>Public endpoint — no authentication required</Note>
+
+Authenticates a user with email and password. On success, creates a session and returns user data. If the account exists but the email is not yet verified, a fresh OTP is sent and a `requiresOtp` flag is returned.
+
+<Warning>
+  OAuth accounts (registered via Google or GitHub) cannot log in through this endpoint. They will receive `401 Invalid credentials`.
+</Warning>
+
+**Request body**
+
+<ParamField body="email" type="string" required>
+  Registered email address.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Account password.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on successful login.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  Authenticated user data.
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">User ID.</ResponseField>
+    <ResponseField name="fullName" type="string">Full display name.</ResponseField>
+    <ResponseField name="role" type="string">Account role.</ResponseField>
+    <ResponseField name="clanId" type="string | null">Assigned clan identifier.</ResponseField>
+    <ResponseField name="firstLogin" type="boolean">`true` if onboarding is not yet complete.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Error responses**
+
+| Status | Body | Condition |
+|--------|------|-----------|
+| `401 Unauthorized` | `{ error: "Invalid credentials." }` | Wrong email/password, or OAuth account |
+| `403 Forbidden` | `{ requiresOtp: true, error: "...", email }` | Account exists but email not yet verified; new OTP sent |
+| `500 Internal Server Error` | `{ error: "Server error during login." }` | Unexpected server error |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -c cookies.txt \
+  -d '{"email": "coder@riwi.io", "password": "secret123"}'
+```
+
+---
+
+## GET /api/auth/check
+
+<Note>Public endpoint — returns `authenticated: false` if no session exists</Note>
+
+Checks whether the current request has a valid session. Used by the frontend to determine login state on page load. Also accessible as `GET /api/auth/me` for authenticated users.
+
+**Response — 200 OK (authenticated)**
+
+<ResponseField name="authenticated" type="boolean">
+  `true` when a valid session is found.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  Current user data.
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">User ID.</ResponseField>
+    <ResponseField name="email" type="string">Email address.</ResponseField>
+    <ResponseField name="fullName" type="string">Full display name.</ResponseField>
+    <ResponseField name="role" type="string">Account role.</ResponseField>
+    <ResponseField name="clanId" type="string | null">Assigned clan identifier.</ResponseField>
+    <ResponseField name="firstLogin" type="boolean">Onboarding status.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Response — 401 Unauthorized (no session)**
+
+```json
+{ "authenticated": false }
+```
+
+**Example**
+
+```bash
+curl http://localhost:3000/api/auth/check -b cookies.txt
+```
+
+---
+
+## GET /api/auth/google
+
+<Note>Public endpoint — initiates OAuth redirect flow</Note>
+
+Redirects the browser to Google's OAuth consent screen. Requested scopes: `profile` and `email`. The `prompt: select_account` option is set so users can choose which Google account to use.
+
+This is a browser redirect, not a fetch/XHR endpoint. Link to it directly from your login page.
+
+**Callback:** `GET /api/auth/google/callback` — handled internally by Passport. On success, redirects to the coder dashboard or onboarding page. On failure, redirects to `/login.html?error=google_failed`.
+
+**Example**
+
+```html
+<a href="http://localhost:3000/api/auth/google">Sign in with Google</a>
+```
+
+---
+
+## GET /api/auth/github
+
+<Note>Public endpoint — initiates OAuth redirect flow</Note>
+
+Redirects the browser to GitHub's OAuth authorization page. Requested scope: `user:email`.
+
+This is a browser redirect, not a fetch/XHR endpoint.
+
+**Callback:** `GET /api/auth/github/callback` — handled internally by Passport. On success, redirects to the coder dashboard or onboarding page. On failure, redirects to `/login.html?error=github_failed`.
+
+**Example**
+
+```html
+<a href="http://localhost:3000/api/auth/github">Sign in with GitHub</a>
+```
+
+---
+
+## POST /api/auth/logout
+
+<Info>Requires authentication</Info>
+
+Destroys the current session and clears the `riwi.sid` cookie.
+
+**Request body**
+
+None.
+
+**Response — 200 OK**
+
+<ResponseField name="message" type="string">
+  `"Session closed."`
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `500 Internal Server Error` | Session destruction failed |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/auth/logout -b cookies.txt
+```
+
+---
+
+## GET /api/auth/me
+
+<Info>Requires authentication</Info>
+
+Returns the authenticated user's profile. This is an alias for `GET /api/auth/check` that enforces authentication via middleware.
+
+**Response — 200 OK**
+
+Same shape as `GET /api/auth/check` when authenticated.
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+
+**Example**
+
+```bash
+curl http://localhost:3000/api/auth/me -b cookies.txt
+```
+
+---
+
+## PATCH /api/auth/profile
+
+<Info>Requires authentication</Info>
+
+Updates the authenticated user's display name and/or clan. At least one field must be provided.
+
+**Request body**
+
+<ParamField body="fullName" type="string">
+  New display name.
+</ParamField>
+
+<ParamField body="clanId" type="string">
+  New clan identifier.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on successful update.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  Updated user data.
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">User ID.</ResponseField>
+    <ResponseField name="email" type="string">Email address.</ResponseField>
+    <ResponseField name="fullName" type="string">Updated display name.</ResponseField>
+    <ResponseField name="role" type="string">Account role.</ResponseField>
+    <ResponseField name="clanId" type="string | null">Updated clan identifier.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | Neither `fullName` nor `clanId` provided |
+| `401 Unauthorized` | No active session |
+| `500 Internal Server Error` | Database update failed |
+
+**Example**
+
+```bash
+curl -X PATCH http://localhost:3000/api/auth/profile \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"fullName": "Ana García López"}'
+```
+
+---
+
+## PATCH /api/auth/complete-onboarding
+
+<Info>Requires authentication — role: `coder`</Info>
+
+Marks the coder's onboarding as complete by setting `first_login = false` and optionally assigning a clan. After this call, the `checkOnboarding` middleware will no longer block API access.
+
+**Request body**
+
+<ParamField body="clanId" type="string">
+  Clan to assign to the coder during onboarding. Optional — can be set later via `PATCH /api/auth/profile`.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on successful completion.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  `"Onboarding completed."`
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `403 Forbidden` | Authenticated user is not a `coder` |
+| `500 Internal Server Error` | Database update failed |
+
+**Example**
+
+```bash
+curl -X PATCH http://localhost:3000/api/auth/complete-onboarding \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"clanId": "turing-a"}'
+```

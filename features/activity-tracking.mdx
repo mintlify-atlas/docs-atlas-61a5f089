@@ -1,0 +1,224 @@
+---
+title: "Activity Tracking"
+description: "How coders track daily plan activities, submit evidence, and receive feedback notifications from their Team Leader."
+---
+
+Once a coder has an active learning plan, the activity tracking system lets them record progress on each day's activities, write reflections, log time spent, and submit evidence for Team Leader review.
+
+## Marking an activity complete
+
+Coders mark activities complete from the plan view. A single endpoint handles both creating and updating progress records:
+
+```
+PATCH /api/coder/activities/:id/complete
+```
+
+The `id` is the `plan_activities.id` value. The endpoint uses an `INSERT ... ON CONFLICT DO UPDATE` pattern, so calling it a second time updates the existing record rather than creating a duplicate.
+
+**Request body**
+
+<ParamField body="reflectionText" type="string">
+  The coder's written reflection on the activity. Free-form text. Optional but encouraged by the plan's daily `reflection_prompt`.
+</ParamField>
+
+<ParamField body="timeSpent" type="integer">
+  Time spent on the activity in minutes. Optional.
+</ParamField>
+
+**Example request**
+
+```json
+{
+  "reflectionText": "I struggled with self-joins at first but the visual diagram helped a lot. Will practice with the employees table again tomorrow.",
+  "timeSpent": 52
+}
+```
+
+**Example response**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 301,
+    "activity_id": 88,
+    "coder_id": 42,
+    "completed": true,
+    "reflection_text": "I struggled with self-joins at first...",
+    "time_spent_minutes": 52,
+    "completed_at": "2026-03-15T14:30:00.000Z"
+  }
+}
+```
+
+## Completing a full day
+
+Alternatively, coders can mark an entire plan day complete in one action:
+
+```
+POST /api/coder/plan/:planId/day/:day/complete
+```
+
+This records the day's completion timestamp in `complementary_plans.completed_days` (a JSONB field) and bulk-inserts `activity_progress` rows for every activity in that day. Valid day numbers are 1–20.
+
+Completing a day awards **Kairo score points**. Completing all 20 days awards an additional completion bonus.
+
+## Submitting evidence
+
+Coders can submit supporting evidence for any plan activity — a file URL or an external link.
+
+<Tabs>
+  <Tab title="File URL">
+    Submit a link to a file already hosted in storage:
+
+    ```json
+    {
+      "activity_id": 88,
+      "file_url": "https://storage.example.com/evidence/query-diagram.png",
+      "description": "ER diagram for the self-join exercise"
+    }
+    ```
+  </Tab>
+  <Tab title="Link URL">
+    Submit a link to an external resource such as a GitHub repository, CodePen, or Replit:
+
+    ```json
+    {
+      "activity_id": 88,
+      "link_url": "https://github.com/coder42/sql-practice/blob/main/week3/self-joins.sql",
+      "description": "SQL file with self-join solutions"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+Evidence submissions are stored in `evidence_submissions`. The Team Leader can view all submissions for coders in their clan.
+
+## Progress percentage
+
+The `v_coder_dashboard` database view calculates completion percentage in real time:
+
+```sql
+CREATE VIEW v_coder_dashboard AS
+SELECT
+  u.id,
+  u.full_name,
+  COUNT(DISTINCT pa.id)  AS total_activities,
+  SUM(CASE WHEN ap.completed = TRUE THEN 1 ELSE 0 END) AS completed_activities,
+  ROUND(
+    (SUM(CASE WHEN ap.completed = TRUE THEN 1 ELSE 0 END)::NUMERIC /
+     NULLIF(COUNT(DISTINCT pa.id), 0)) * 100,
+  2) AS completion_percentage
+FROM users u
+LEFT JOIN complementary_plans cp ON u.id = cp.coder_id AND cp.is_active = TRUE
+LEFT JOIN plan_activities pa     ON cp.id = pa.plan_id
+LEFT JOIN activity_progress ap   ON pa.id = ap.activity_id AND ap.coder_id = u.id
+WHERE u.role = 'coder'
+GROUP BY u.id, ...;
+```
+
+The view joins `plan_activities` from the currently active plan against `activity_progress` rows for that coder. `NULLIF` prevents division-by-zero for coders with no activities yet.
+
+The dashboard endpoint (`GET /api/coder/dashboard`) does not query this view directly — it computes similar stats inline. The view is available for TL queries and reporting.
+
+## TL feedback notifications
+
+When a Team Leader posts feedback on a coder's plan activity, a notification is created with `is_read = false`. The coder sees a bell icon in the dashboard header with a red dot when there are unread notifications.
+
+### Marking feedback as read
+
+```
+PATCH /api/coder/feedback/:id/read
+```
+
+Sets `tl_feedback.is_read = true` and `read_at = NOW()` for the feedback record. This also sends a real-time notification back to the TL confirming the feedback was read.
+
+**Example response**
+
+```json
+{
+  "success": true,
+  "message": "Feedback marked as read"
+}
+```
+
+### Viewing notifications
+
+The `GET /api/coder/dashboard` response includes a `notifications` block with the last 5 TL feedback messages:
+
+```json
+{
+  "notifications": {
+    "unread": 2,
+    "items": [
+      {
+        "id": 14,
+        "text": "Great work on the JOIN exercise. Try the subquery challenge next.",
+        "type": "activity",
+        "tlName": "Carlos Martínez",
+        "createdAt": "2026-03-14T16:00:00.000Z",
+        "isRead": false
+      }
+    ]
+  }
+}
+```
+
+<Note>
+  The `unread` count in the dashboard response reflects the number of feedback items returned (up to 5). The `tl_feedback.is_read` column drives the bell icon — `false` shows the red dot indicator.
+</Note>
+
+## Database tables
+
+### `activity_progress`
+
+```sql
+CREATE TABLE activity_progress (
+  id                 SERIAL PRIMARY KEY,
+  activity_id        INT NOT NULL,
+  coder_id           INT NOT NULL,
+  completed          BOOLEAN DEFAULT FALSE,
+  reflection_text    TEXT,
+  time_spent_minutes INT,
+  completed_at       TIMESTAMP NULL,
+  UNIQUE (activity_id, coder_id),
+  FOREIGN KEY (activity_id) REFERENCES plan_activities(id) ON DELETE CASCADE,
+  FOREIGN KEY (coder_id)    REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `activity_id` | `INT` | References the `plan_activities` row |
+| `coder_id` | `INT` | The coder who completed the activity |
+| `completed` | `BOOLEAN` | `true` once marked complete |
+| `reflection_text` | `TEXT` | Free-form reflection written by the coder |
+| `time_spent_minutes` | `INT` | Self-reported time in minutes |
+| `completed_at` | `TIMESTAMP` | Set when the activity is marked complete |
+
+The `UNIQUE (activity_id, coder_id)` constraint ensures one progress record per coder per activity, enabling the `ON CONFLICT DO UPDATE` upsert pattern.
+
+### `evidence_submissions`
+
+```sql
+CREATE TABLE evidence_submissions (
+  id           SERIAL PRIMARY KEY,
+  activity_id  INT NOT NULL,
+  coder_id     INT NOT NULL,
+  file_url     TEXT,
+  link_url     TEXT,
+  description  TEXT,
+  submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (activity_id) REFERENCES plan_activities(id) ON DELETE CASCADE,
+  FOREIGN KEY (coder_id)    REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `file_url` | `TEXT` | URL to an uploaded file |
+| `link_url` | `TEXT` | URL to an external resource (GitHub, Replit, CodePen, etc.) |
+| `description` | `TEXT` | Short description of the evidence provided |
+| `submitted_at` | `TIMESTAMP` | Set automatically on insert |
+
+A submission can include a `file_url`, a `link_url`, or both. At least one should be provided for the record to be meaningful.

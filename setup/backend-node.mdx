@@ -1,0 +1,209 @@
+---
+title: "Node.js backend"
+description: "Setup, configuration, and internals of the Kairo Express API gateway."
+---
+
+The Node.js backend (`backend-node/`) is the central API gateway for the Kairo platform. It handles user authentication, business logic, session management, and acts as the orchestrator between the frontend, the PostgreSQL database, and the Python AI microservice.
+
+## Prerequisites
+
+- **Node.js** 18 or later (LTS recommended)
+- **npm** 9 or later (bundled with Node.js)
+- A running PostgreSQL instance — see [Database setup](/setup/database)
+- Environment variables configured — see [Environment variables](/setup/environment)
+
+<Tip>
+  Run `node --version` and `npm --version` to verify your installed versions before proceeding.
+</Tip>
+
+## Installation and startup
+
+<Steps>
+  <Step title="Navigate to the backend directory">
+    ```bash
+    cd backend-node
+    ```
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    npm install
+    ```
+  </Step>
+  <Step title="Create the environment file">
+    Create `backend-node/.env` with your configuration. See [Environment variables](/setup/environment) for all required values.
+  </Step>
+  <Step title="Start the development server">
+    ```bash
+    npm run dev
+    ```
+    A successful startup prints:
+    ```
+    ✅ DATABASE HANDSHAKE SUCCESSFUL
+    🚀 KAIRO API GATEWAY STARTED SUCCESSFULLY
+    📡 URL      : http://localhost:3000
+    ```
+  </Step>
+</Steps>
+
+## npm scripts
+
+| Script | Command | Description |
+|--------|---------|-------------|
+| `start` | `node src/server.js` | Start the server without file watching. Use in production. |
+| `dev` | `nodemon src/server.js` | Start with hot-reload via nodemon. Use during development. |
+| `dev:basic` | `BASIC_BACKEND=true nodemon src/server.js` | Start with the `BASIC_BACKEND` flag set. |
+
+## Key dependencies
+
+| Package | Version | Purpose |
+|---------|---------|--------|
+| `express` | ^5.2.1 | HTTP server and routing framework |
+| `passport` | ^0.7.0 | Authentication middleware and session serialization |
+| `passport-github2` | ^0.1.12 | GitHub OAuth 2.0 strategy |
+| `passport-google-oauth20` | ^2.0.0 | Google OAuth 2.0 strategy |
+| `express-session` | ^1.19.0 | Cookie-based session management |
+| `connect-pg-simple` | ^10.0.0 | PostgreSQL-backed session store |
+| `pg` | ^8.18.0 | PostgreSQL client (used for the connection pool and session store) |
+| `@supabase/supabase-js` | ^2.98.0 | Supabase JavaScript client |
+| `bcrypt` | ^6.0.0 | Password hashing |
+| `express-rate-limit` | ^8.3.1 | IP-based rate limiting |
+| `cors` | ^2.8.6 | Cross-Origin Resource Sharing middleware |
+| `morgan` | ^1.10.1 | HTTP request logger |
+| `multer` | ^2.1.1 | Multipart form data / file uploads |
+| `resend` | ^6.9.3 | Transactional email delivery |
+| `mongoose` | ^9.3.0 | MongoDB ODM (optional — for avatar and extended profile data) |
+| `dotenv` | ^17.3.1 | Loads `.env` into `process.env` |
+| `nodemon` | ^3.1.14 | Dev-only: restarts the server on file changes |
+
+## Middleware stack
+
+Middleware is applied in the following order in `src/server.js`:
+
+1. **CORS** — enforces the allowed-origins list derived from `FRONTEND_URL`
+2. **`OPTIONS` preflight handler** — responds to all `OPTIONS /{*path}` requests with CORS headers
+3. **Morgan** — logs HTTP requests in `dev` format
+4. **JSON body parser** — parses `application/json` bodies up to 5 MB
+5. **URL-encoded body parser** — parses form submissions up to 5 MB
+6. **Session** — cookie-based sessions backed by PostgreSQL (`connect-pg-simple`)
+7. **Passport initialize** — sets up the Passport authentication framework
+8. **Passport session** — restores authenticated user from the session store
+
+## CORS configuration
+
+The CORS behavior differs between development and production:
+
+| Environment | Allowed origins |
+|-------------|----------------|
+| Development (`NODE_ENV != production`) | `http://localhost:5500`, `http://localhost:5173` |
+| Production | The origin extracted from `FRONTEND_URL` only |
+
+The `FRONTEND_URL` value is parsed with `new URL()` to extract only the origin component, so including a path in the URL is safe. If `FRONTEND_URL` is not set in production, the server logs a warning and temporarily allows all origins.
+
+Credentials (`credentials: true`) are always enabled, which is required for cookie-based session authentication.
+
+## Rate limiting
+
+Two rate limiters are configured:
+
+| Limiter | Window | Max requests | Applied to |
+|---------|--------|--------------|------------|
+| `authLimiter` | 15 minutes | 20 per IP | Authentication routes (`/api/auth`) |
+| `otpLimiter` | 10 minutes | 5 per IP | OTP verification endpoints |
+
+Rate limit responses use the `RateLimit-*` standard headers and return:
+
+```json
+{ "error": "Too many requests, please try again later." }
+```
+
+## Session configuration
+
+Sessions are stored in a PostgreSQL table named `session`, created automatically by `connect-pg-simple` if it does not exist.
+
+| Setting | Value |
+|---------|-------|
+| Cookie name | `riwi.sid` |
+| Max age | 24 hours |
+| `httpOnly` | `true` (not accessible from JavaScript) |
+| `secure` | `true` in production, `false` in development |
+| `sameSite` | `none` in production, `lax` in development |
+| Store | PostgreSQL via `DATABASE_URL` or `DATABASE_DIRECT_URL` |
+
+<Info>
+  `sameSite: 'none'` with `secure: true` is required for cross-origin cookie delivery in production, such as when the frontend is on GitHub Pages and the API is on Railway.
+</Info>
+
+## Route mount points
+
+All routes are mounted under the `/api` prefix:
+
+| Prefix | Router file | Description |
+|--------|-------------|-------------|
+| `/api/auth` | `routes/authRoutes.js` | Registration, login, logout, OAuth callbacks, OTP, session check |
+| `/api/diagnostics` | `routes/diagnosticRoutes.js` | Soft skills diagnostic submission and retrieval |
+| `/api/coder` | `routes/coderRoutes.js` | Coder-specific data: progress, plans, activities |
+| `/api/tl` | `routes/tlRoutes.js` | Team Leader dashboard data and clan management |
+| `/api/ai` | `routes/iaRoutes.js` | AI plan generation — proxies requests to the Python service |
+| `/api/notifications` | `routes/notificationRoutes.js` | TL feedback notifications and read-state management |
+| `/api/profile` | `routes/profileRoutes.js` | User profile read and update |
+| `/api` | `routes/assignmentRoutes.js` | Assignment and evidence submission endpoints |
+| `/api/health` | Inline handler | Database connectivity check; returns uptime and DB timestamp |
+
+## Database connection
+
+The pool is configured in `src/config/database.js` with the following settings:
+
+| Setting | Value |
+|---------|-------|
+| Max connections | 10 |
+| Idle timeout | 30 seconds |
+| Connection timeout | 30 seconds |
+| Query timeout | 30 seconds |
+| SSL | Enabled for Supabase; disable with `DB_SSL=false` for local Postgres |
+
+At startup, `testConnection()` runs a `SELECT NOW()` handshake query. If this fails, the server exits with code 1.
+
+## OAuth configuration
+
+GitHub and Google OAuth strategies are registered in `src/config/passport.js`. The OAuth callback base URL is determined automatically:
+
+- **Production**: `https://kairo-integrative-project-turing-production.up.railway.app`
+- **Development**: `http://localhost:{PORT}`
+
+OAuth callback URLs:
+- GitHub: `{BASE_URL}/api/auth/github/callback`
+- Google: `{BASE_URL}/api/auth/google/callback`
+
+Register these exact URLs as authorized redirect URIs in your GitHub and Google OAuth application settings.
+
+## Health check
+
+```http
+GET /api/health
+```
+
+Returns database connectivity status:
+
+```json
+{
+  "status": "active",
+  "uptime": 142.3,
+  "database": {
+    "connected": true,
+    "timestamp": "2026-03-15T10:00:00.000Z"
+  }
+}
+```
+
+Returns `503` with `status: "unstable"` if the database query fails.
+
+## Production deployment notes
+
+<Warning>
+  Set `NODE_ENV=production` in your production environment. This enables secure cookies, restricts CORS to `FRONTEND_URL` only, and suppresses verbose error messages in API responses.
+</Warning>
+
+- The server binds to `0.0.0.0` (all interfaces), which is required for containerized deployments.
+- `app.set('trust proxy', 1)` is set, which is necessary when running behind a reverse proxy or load balancer (Railway, Heroku, etc.) so that rate limiting uses the real client IP.
+- Session cookies require `secure: true` and `sameSite: 'none'` for cross-origin setups. Both are automatically applied when `NODE_ENV=production`.
+- Use the `start` script (`node src/server.js`) rather than `nodemon` in production.

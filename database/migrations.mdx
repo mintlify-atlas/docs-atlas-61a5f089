@@ -1,0 +1,273 @@
+---
+title: "Migrations and seed data"
+description: "How to apply the schema, run migrations, seed development data, and perform a full database reset."
+---
+
+Kairo manages its PostgreSQL schema through a set of SQL files versioned in the repository. There is no migration framework — changes are applied manually via the Supabase SQL Editor or `psql`.
+
+<Info>
+  The current schema version is **v3.0** (March 2026), as noted in the header of `schema.sql`.
+</Info>
+
+## Initial setup
+
+<Steps>
+  <Step title="Apply the schema">
+    Open the **SQL Editor** in your Supabase dashboard (or connect with `psql`) and run the full `schema.sql` file. This creates all enum types, tables, indexes, views, and comments.
+
+    <Tabs>
+      <Tab title="Supabase SQL Editor">
+        1. Go to your Supabase project → **SQL Editor**
+        2. Click **New query**
+        3. Paste the full contents of `schema.sql`
+        4. Click **Run**
+      </Tab>
+      <Tab title="psql">
+        ```bash
+        psql -U your_user -d your_db -f database/schema.sql
+        ```
+      </Tab>
+    </Tabs>
+
+    <Warning>
+      If a previous schema exists, the `CREATE TABLE` statements will fail because the tables already exist. Either drop the existing tables first (see [Full database reset](#full-database-reset)) or use the migration files instead.
+    </Warning>
+  </Step>
+
+  <Step title="Apply RLS policies">
+    After the schema is created, run `rls_policies.sql` to enable Row Level Security on every table and create all access policies.
+
+    <Tabs>
+      <Tab title="Supabase SQL Editor">
+        1. Open a new query in the **SQL Editor**
+        2. Paste the full contents of `rls_policies.sql`
+        3. Click **Run**
+      </Tab>
+      <Tab title="psql">
+        ```bash
+        psql -U your_user -d your_db -f database/rls_policies.sql
+        ```
+      </Tab>
+    </Tabs>
+
+    <Note>
+      RLS must be applied after the tables exist. Running `rls_policies.sql` before `schema.sql` will fail.
+    </Note>
+  </Step>
+
+  <Step title="Run the required migrations">
+    After the base schema, apply the migrations in numbered order. See [Migration files](#migration-files) below for what each one does.
+
+    ```bash
+    psql -U your_user -d your_db \
+      -f database/migrations/001_add_clans_and_priority_and_notifications.sql \
+      -f database/migrations/002_add_raw_answers_to_soft_skills.sql \
+      -f database/migrations/005_create_user_profiles.sql
+    ```
+
+    <Note>
+      Migrations 001 and 002 add columns that the application code depends on. Do not skip them, even when starting from a fresh `schema.sql` — the current `schema.sql` (v3.0) already incorporates these columns, but older deployments may not.
+    </Note>
+  </Step>
+
+  <Step title="Seed development data (optional)">
+    To populate the database with sample users, modules, topics, and progress data for development and testing:
+
+    <Tabs>
+      <Tab title="Supabase SQL Editor">
+        1. Open a new query
+        2. Paste the full contents of `seeds/users.sql`
+        3. Click **Run**
+      </Tab>
+      <Tab title="psql">
+        ```bash
+        psql -U your_user -d your_db -f database/seeds/users.sql
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+## Migration files
+
+Migrations live in `database/migrations/`. Each file is idempotent — it uses `IF NOT EXISTS` guards so it is safe to re-run.
+
+<AccordionGroup>
+  <Accordion title="001 — Add clans, priority level, and notifications">
+    **File:** `migrations/001_add_clans_and_priority_and_notifications.sql`
+
+    **Purpose:** Enables the 6-card system, clan filtering, and the notification bell.
+
+    **Changes:**
+
+    1. **`users.clan_id`** — Adds a `VARCHAR(50)` column to store a coder's clan assignment (`Turing`, `Tesla`, or `McCarthy`). Creates index `idx_users_clan_id`.
+
+    2. **`priority_level_enum`** — Creates the enum type `('low', 'medium', 'high')` if it does not already exist (safe `DO $$` block).
+
+    3. **`complementary_plans.priority_level`** — Adds a `priority_level_enum` column defaulting to `'medium'`. Creates index `idx_complementary_plans_priority`.
+
+    4. **`tl_feedback.is_read`** — Adds a `BOOLEAN` column defaulting to `FALSE`. Creates indexes `idx_tl_feedback_is_read` and `idx_tl_feedback_coder_unread` for efficient unread notification queries.
+
+    ```sql
+    -- Applied changes summary
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS clan_id VARCHAR(50);
+    ALTER TABLE complementary_plans ADD COLUMN IF NOT EXISTS priority_level priority_level_enum DEFAULT 'medium';
+    ALTER TABLE tl_feedback ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE;
+    ```
+  </Accordion>
+
+  <Accordion title="002 — Add raw_answers to soft_skills_assessment">
+    **File:** `migrations/002_add_raw_answers_to_soft_skills.sql`
+
+    **Purpose:** Fixes an INSERT failure in the `softSkills.js` model caused by a missing column.
+
+    **Changes:**
+
+    - **`soft_skills_assessment.raw_answers`** — Adds a `JSONB` column to store the full onboarding answers array in the format `[{questionId, optionId, score}]`. Useful for audit purposes and re-processing assessments with updated scoring logic.
+
+    ```sql
+    ALTER TABLE soft_skills_assessment
+      ADD COLUMN IF NOT EXISTS raw_answers JSONB;
+    ```
+  </Accordion>
+
+  <Accordion title="005 — Create user_profiles table">
+    **File:** `migrations/005_create_user_profiles.sql`
+
+    **Purpose:** Adds a separate table for extended profile information (social links, bio, location) for both coders and TLs.
+
+    **Changes:**
+
+    - Creates the `user_profiles` table with a `user_id` primary key referencing `users.id`.
+    - Creates index `idx_user_profiles_user_id`.
+
+    | Column | Type | Description |
+    |---|---|---|
+    | `user_id` | `INT` | `PRIMARY KEY`, references `users.id` (CASCADE delete) |
+    | `phone` | `VARCHAR(20)` | Contact phone number |
+    | `location` | `VARCHAR(100)` | City or country |
+    | `birth_date` | `DATE` | Date of birth |
+    | `bio` | `TEXT` | Short personal bio |
+    | `github_url` | `TEXT` | GitHub profile URL |
+    | `linkedin_url` | `TEXT` | LinkedIn profile URL |
+    | `twitter_url` | `TEXT` | Twitter/X profile URL |
+    | `portfolio_url` | `TEXT` | Personal portfolio URL |
+    | `updated_at` | `TIMESTAMP` | Last update timestamp |
+
+    <Note>
+      `user_profiles` is defined in a migration (not in `schema.sql`) because it was added after the initial schema release. Apply migration 005 to include it in your deployment.
+    </Note>
+  </Accordion>
+</AccordionGroup>
+
+## Seed data
+
+The `database/seeds/` directory contains SQL scripts for populating the database with test data.
+
+### `seeds/users.sql`
+
+Inserts a representative dataset for development and testing. The script runs inside a transaction (`BEGIN` / `COMMIT`).
+
+**What gets created:**
+
+| Category | Count | Details |
+|---|---|---|
+| Users | 8 | 2 TLs (María García, Carlos Rodríguez) + 6 coders across 3 clans |
+| Clans | 3 | Turing (Juan, Ana), Tesla (Pedro, Sofía), McCarthy (Luis, María) |
+| Soft skills assessments | 6 | One per coder, with varied scores to cover all risk scenarios |
+| Modules | 6 | Python Fundamentals (4w), HTML & CSS (4w), JavaScript (4w), Databases (4w), Backend with Node.js (3w), React (4w) |
+| Topics | 12 | 4 topics per module for the first 3 modules |
+| Moodle progress records | 7 | Coders at different weeks with scores ranging from 58 to 95 |
+| Struggling topics | 6 | Assigned to Juan, Pedro, and Luis |
+
+**Test cases included:**
+
+| Coder | Condition | Purpose |
+|---|---|---|
+| Juan Pérez | Low autonomy (2), score 65.5 | Triggers medium-risk detection |
+| Ana López | Balanced scores (4–5), score 88 | Represents a healthy coder |
+| Pedro Martínez | Low time management (2), score 72 | Tests time-management-specific alerts |
+| Sofía Hernández | Excellent across all scores (5), score 95 | Success case |
+| Luis González | Very low autonomy and communication (2), score 58 | High-risk scenario |
+| María Sánchez | Balanced (3–4), no progress record | Tests missing-data edge cases |
+
+<Warning>
+  The seed file uses plaintext passwords (`hashed_password_here`) for convenience. Never use this data in a production environment.
+</Warning>
+
+**Dynamically populated tables** (not seeded — filled by application actions):
+
+- `complementary_plans` — created when a TL generates plans via the AI agent
+- `activity_progress` — updated when coders mark activities complete
+- `tl_feedback` — created when TLs send messages
+- `risk_flags` — written by the AI risk detector agent
+- `ai_reports` — written by the AI report generator agent
+
+## Full database reset
+
+To drop all tables and start from scratch, uncomment and run the block at the top of `schema.sql`:
+
+```sql
+-- Drop all tables (in reverse dependency order)
+DROP TABLE IF EXISTS ai_generation_log CASCADE;
+DROP TABLE IF EXISTS ai_reports CASCADE;
+DROP TABLE IF EXISTS risk_flags CASCADE;
+DROP TABLE IF EXISTS evidence_submissions CASCADE;
+DROP TABLE IF EXISTS tl_feedback CASCADE;
+DROP TABLE IF EXISTS activity_progress CASCADE;
+DROP TABLE IF EXISTS plan_activities CASCADE;
+DROP TABLE IF EXISTS complementary_plans CASCADE;
+DROP TABLE IF EXISTS coder_struggling_topics CASCADE;
+DROP TABLE IF EXISTS topics CASCADE;
+DROP TABLE IF EXISTS moodle_progress CASCADE;
+DROP TABLE IF EXISTS modules CASCADE;
+DROP TABLE IF EXISTS soft_skills_assessment CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+-- Drop all enum types
+DROP TYPE IF EXISTS ai_agent_enum CASCADE;
+DROP TYPE IF EXISTS report_target_enum CASCADE;
+DROP TYPE IF EXISTS risk_level_enum CASCADE;
+DROP TYPE IF EXISTS feedback_type_enum CASCADE;
+DROP TYPE IF EXISTS activity_type_enum CASCADE;
+DROP TYPE IF EXISTS learning_style_enum CASCADE;
+DROP TYPE IF EXISTS role_enum CASCADE;
+DROP TYPE IF EXISTS priority_level_enum CASCADE;
+```
+
+Alternatively, to truncate data without dropping the structure:
+
+```sql
+-- Truncate all tables (preserves schema)
+TRUNCATE TABLE ai_generation_log CASCADE;
+TRUNCATE TABLE ai_reports CASCADE;
+TRUNCATE TABLE risk_flags CASCADE;
+TRUNCATE TABLE evidence_submissions CASCADE;
+TRUNCATE TABLE tl_feedback CASCADE;
+TRUNCATE TABLE activity_progress CASCADE;
+TRUNCATE TABLE plan_activities CASCADE;
+TRUNCATE TABLE complementary_plans CASCADE;
+TRUNCATE TABLE coder_struggling_topics CASCADE;
+TRUNCATE TABLE topics CASCADE;
+TRUNCATE TABLE moodle_progress CASCADE;
+TRUNCATE TABLE modules CASCADE;
+TRUNCATE TABLE soft_skills_assessment CASCADE;
+TRUNCATE TABLE users RESTART IDENTITY CASCADE;
+```
+
+After a full reset, re-apply the files in this order:
+
+1. `schema.sql`
+2. `rls_policies.sql`
+3. `migrations/001_add_clans_and_priority_and_notifications.sql`
+4. `migrations/002_add_raw_answers_to_soft_skills.sql`
+5. `migrations/005_create_user_profiles.sql`
+6. `seeds/users.sql` (development only)
+
+## Version history
+
+| Version | Date | Description |
+|---|---|---|
+| v3.0 | March 2026 | Current version. Clean schema consolidating all migrations. Adds `clan_id`, `priority_level`, `is_read`, `raw_answers`, and `user_profiles`. |
+| v2.x | — | Added clan support (migration 001), raw answers column (migration 002), and user profiles table (migration 005). |
+| v1.0 | — | Initial schema with core tables: users, modules, moodle_progress, complementary_plans, tl_feedback, risk_flags, ai_reports, ai_generation_log. |

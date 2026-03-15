@@ -1,0 +1,155 @@
+---
+title: "Frontend"
+description: "How to serve, configure, and understand the Kairo frontend application."
+---
+
+The Kairo frontend (`frontend/`) is a Multi-Page Application (MPA) built with Vanilla JavaScript and Bootstrap 5. It communicates exclusively with the Node.js backend via `fetch` calls and uses cookie-based sessions for authentication.
+
+## Prerequisites
+
+- The Node.js backend must be running before the frontend will work. See [Node.js backend setup](/setup/backend-node).
+- `FRONTEND_URL` in `backend-node/.env` must match the origin you use to serve the frontend. See [Environment variables](/setup/environment).
+
+## Serving locally
+
+The frontend is a collection of static HTML files and must be served over HTTP (not opened directly as `file://` URLs) for cookies and `fetch` requests to work correctly.
+
+<Tabs>
+  <Tab title="VS Code Live Server (recommended)">
+    1. Install the [Live Server extension](https://marketplace.visualstudio.com/items?itemName=ritwickdey.LiveServer) in VS Code.
+    2. Right-click any `.html` file and select **Open with Live Server**.
+    3. Live Server serves the project at `http://127.0.0.1:5500` by default.
+    4. Make sure `FRONTEND_URL=http://127.0.0.1:5500/frontend` (or the path to your frontend directory) is set in `backend-node/.env`.
+  </Tab>
+  <Tab title="npx serve">
+    From the repository root:
+    ```bash
+    npx serve -p 5500
+    ```
+    This serves the entire repository at `http://localhost:5500`.
+  </Tab>
+</Tabs>
+
+<Warning>
+  The origin used to access the frontend (including protocol and port) must match `FRONTEND_URL` in `backend-node/.env` exactly. A mismatch causes the backend to block all requests with a CORS error.
+</Warning>
+
+## Directory structure
+
+```
+frontend/
+├── assets/
+│   ├── css/          # Stylesheets
+│   ├── img/          # Images and icons
+│   └── js/           # Shared scripts (e.g., Bootstrap bundle)
+└── src/
+    ├── core/
+    │   ├── auth/     # Auth service, session manager, OTP UI, validation
+    │   ├── services/ # Profile service
+    │   ├── utils/    # Fetch cache and other utilities
+    │   ├── config.js # API base URL configuration
+    │   └── notificationsSSE.js  # Server-Sent Events notification client
+    ├── services/
+    │   └── onboarding-data.js   # Onboarding questionnaire data
+    └── views/
+        ├── auth/
+        │   ├── login.html
+        │   ├── register.html
+        │   └── email-validation.html
+        ├── coder/
+        │   ├── dashboard.html
+        │   ├── onboarding.html
+        │   ├── assignment.html
+        │   ├── IAtrainer.html
+        │   └── profile.html
+        └── tl/
+            ├── dashboard.html
+            ├── assignment.html
+            ├── group.html
+            └── profile.html
+```
+
+## API base URL
+
+The file `src/core/config.js` exports the `API_BASE` constant used by all service modules:
+
+```javascript
+// Resolves to http://localhost:3000/api in local development
+// Resolves to https://kairo-integrative-project-turing-production.up.railway.app/api in production
+export const API_BASE = computeApiBase();
+```
+
+The URL is selected automatically based on the window's `hostname`:
+
+| Hostname | API_BASE |
+|----------|----------|
+| `localhost` or `127.0.0.1` | `http://localhost:3000/api` |
+| Any LAN IP (`192.168.*`) | `http://localhost:3000/api` |
+| `file:` protocol | `http://localhost:3000/api` |
+| Any other hostname | `https://kairo-integrative-project-turing-production.up.railway.app/api` |
+
+To override this detection, set `window.KAIRO_API_BASE` before any scripts load, or set `window.__KAIRO_DEV_PORT__` to change the local port from the default `3000`.
+
+## Coder views
+
+Coders interact with five pages:
+
+<Columns cols={2}>
+  <Card title="Onboarding" icon="clipboard-list">
+    Shown only on first login (`first_login = true`). Collects soft skills self-assessment and sets `first_login = false` on completion.
+  </Card>
+  <Card title="Dashboard" icon="layout-dashboard">
+    Main coder view. Displays the 6 AI-generated learning plan cards, ordered by priority (high → medium → low), along with Moodle progress data.
+  </Card>
+  <Card title="Assignment" icon="book-open">
+    Shows the daily activities within a selected learning plan card. Coders can mark activities complete and submit evidence.
+  </Card>
+  <Card title="AI Trainer" icon="bot">
+    Conversational AI tutor interface. Sends messages to `POST /chat/ask` on the Python service via the Node.js proxy.
+  </Card>
+  <Card title="Profile" icon="user">
+    Displays and allows editing of the coder's profile information.
+  </Card>
+</Columns>
+
+## Team Leader views
+
+Team Leaders have four dedicated pages:
+
+<Columns cols={2}>
+  <Card title="TL Dashboard" icon="chart-bar">
+    Overview of all coders, their risk levels, and completion metrics. Aggregated from the `v_coder_risk_analysis` view.
+  </Card>
+  <Card title="Assignment" icon="clipboard-check">
+    Allows TLs to generate or review learning plans for individual coders.
+  </Card>
+  <Card title="Group" icon="users">
+    Clan-level view. Filter coders by `clan_id` (Turing, Tesla, McCarthy) and see group progress.
+  </Card>
+  <Card title="Profile" icon="user-cog">
+    TL profile management.
+  </Card>
+</Columns>
+
+## Authentication flow
+
+All pages (except auth pages) run a session guard on load using `src/core/auth/session.js`. The guards call `GET /api/auth/check` to validate the session and redirect unauthenticated users.
+
+| Guard | Used on | Behavior |
+|-------|---------|----------|
+| `requireAuth` | General protected pages | Redirects to login if not authenticated |
+| `requireCompleted` | Coder dashboard, assignment, AI trainer | Redirects to onboarding if `first_login = true` |
+| `requireOnboarding` | Onboarding page | Redirects to dashboard if onboarding already done; redirects TLs to TL dashboard |
+| `requireGuest` | Login, register pages | Redirects to the appropriate dashboard if already logged in |
+
+After a successful login, `sessionManager.redirectByRole()` sends the user to:
+
+- **TL or admin role** → `views/tl/dashboard.html`
+- **Coder, first login** → `views/coder/onboarding.html`
+- **Coder, returning** → `views/coder/dashboard.html`
+
+User data is persisted to `localStorage` under the key `kairo_user` to avoid redundant auth checks between page navigations.
+
+## Notification client
+
+The file `src/core/notificationsSSE.js` implements a Server-Sent Events client that connects to the Node.js backend to receive real-time notifications from Team Leaders. The connection is established after a successful auth check and is keyed by the user's role.

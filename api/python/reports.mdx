@@ -1,0 +1,189 @@
+---
+title: "AI report generation"
+description: "Generates AI-written analytical reports for Team Leaders and exports clan data as a formatted PDF."
+---
+
+<Info>
+  Both endpoints are called by the Node.js server. `POST /generate-report` is role-restricted to `tl` at the Node.js layer. `GET /generate-pdf/{clan}` streams the PDF directly through the Node.js proxy.
+</Info>
+
+## POST /generate-report
+
+Generates a structured AI analytical report for a clan's Team Leader. The endpoint calls the Groq LLM with aggregated clan performance data and saves the result to the `ai_reports` table in Supabase.
+
+### Request body
+
+<ParamField body="clan" type="string" required>
+  The clan identifier string (e.g. `"Alpha"`).
+</ParamField>
+
+<ParamField body="tl_id" type="integer" required>
+  The Team Leader's user ID. Used as `target_id` when saving the report to `ai_reports`.
+</ParamField>
+
+<ParamField body="total_coders" type="integer" required>
+  Total number of coders in the clan.
+</ParamField>
+
+<ParamField body="average_score" type="float" required>
+  Average Moodle score across all coders in the clan (0–100).
+</ParamField>
+
+<ParamField body="high_risk_count" type="integer" required>
+  Number of coders currently flagged as high or critical risk.
+</ParamField>
+
+<ParamField body="top_struggling_topics" type="array">
+  List of topic names that coders are most commonly struggling with. Defaults to `[]`.
+</ParamField>
+
+<ParamField body="soft_skills_summary" type="object">
+  Dictionary of soft skill averages across the clan (e.g. `{"autonomy": 3.2, "teamwork": 4.0}`). Defaults to `{}`.
+</ParamField>
+
+### Report generation
+
+The endpoint builds a prompt containing all input fields and sends it to the Groq LLM:
+
+| Parameter | Value |
+|-----------|-------|
+| Model | `MODEL_NAME` env var, default `llama-3.3-70b-versatile` |
+| `max_tokens` | `1000` |
+| `temperature` | `0.6` |
+| Output format | JSON object (no markdown) |
+
+The model is instructed to act as an educational data analyst and return a report structured with three sections: a current-state summary, main risks, and concrete recommendations.
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  `true` when generation and Supabase persistence succeeded.
+</ResponseField>
+
+<ResponseField name="report" type="object">
+  The AI-generated report.
+  <Expandable title="properties">
+    <ResponseField name="report_title" type="string">
+      Auto-generated title in the format `"Clan {clan} — Performance Report"`.
+    </ResponseField>
+    <ResponseField name="generated_date" type="string">
+      Human-readable date the report was generated (e.g. `"March 15, 2026"`).
+    </ResponseField>
+    <ResponseField name="risk_level" type="string">
+      Overall clan risk level assessed by the model. One of `"low"`, `"medium"`, `"high"`, or `"critical"`.
+    </ResponseField>
+    <ResponseField name="summary" type="string">
+      Paragraph describing the clan's current state.
+    </ResponseField>
+    <ResponseField name="risks" type="string">
+      Paragraph describing the main risks and concerns identified.
+    </ResponseField>
+    <ResponseField name="recommendations" type="string">
+      Paragraph with concrete actions the TL should take.
+    </ResponseField>
+    <ResponseField name="action_items" type="array">
+      List of 3–5 specific action item strings.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `500 Internal Server Error` | The LLM returned text that could not be parsed as valid JSON |
+| `500 Internal Server Error` | Groq API call failed or another unexpected error occurred |
+
+### Supabase operations
+
+| Operation | Table | Details |
+|-----------|-------|---------|
+| Insert report | `ai_reports` | Stores `summary_text`, `risk_level`, `recommendations`, `clan_id`, and sets `viewed_by_tl = false` |
+| Log generation | `ai_generation_log` | Records input clan data, output report JSON, model name, and success flag |
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/generate-report \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clan": "Alpha",
+    "tl_id": 7,
+    "total_coders": 12,
+    "average_score": 64.3,
+    "high_risk_count": 3,
+    "top_struggling_topics": ["JOINs", "Subconsultas", "Índices"],
+    "soft_skills_summary": {"autonomy": 3.1, "teamwork": 3.8, "communication": 2.9}
+  }'
+```
+
+```json
+{
+  "success": true,
+  "report": {
+    "report_title": "Clan Alpha — Performance Report",
+    "generated_date": "March 15, 2026",
+    "risk_level": "high",
+    "summary": "Clan Alpha shows a below-average score of 64.3/100 with 3 coders at high or critical risk...",
+    "risks": "The main concern is the persistent difficulty with SQL JOINs and subconsultas, which are core to the current module...",
+    "recommendations": "The TL should schedule a focused review session on JOINs and pair the at-risk coders with stronger peers...",
+    "action_items": [
+      "Schedule a 1-hour JOIN workshop this week",
+      "Assign peer-mentoring pairs for the 3 high-risk coders",
+      "Share the subconsultas reference sheet in the clan channel"
+    ]
+  }
+}
+```
+
+---
+
+## GET /generate-pdf/{clan}
+
+Builds and streams a formatted PDF report for a clan. No AI is involved — the endpoint reads coder profiles, soft skills assessments, and Moodle progress directly from Supabase and renders them into a styled PDF using [fpdf2](https://py-pdf.github.io/fpdf2/).
+
+### Path parameters
+
+<ParamField path="clan" type="string" required>
+  The clan identifier string. Must match a value in the `clan` column of the `users` table.
+</ParamField>
+
+### Response — 200 OK
+
+Returns a binary PDF file as a streaming response.
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/pdf` |
+| `Content-Disposition` | `attachment; filename=clan_{clan}_report.pdf` |
+
+### PDF contents
+
+The generated PDF includes:
+
+- A cover header with the clan name and generation date
+- An **Overview** section: total coders, average Moodle score, and number of completed diagnostics
+- A **Coder Profiles** section with one entry per coder, including:
+  - Full name and email
+  - Average Moodle score and current week
+  - Soft skill scores: autonomy, time management, problem solving, communication, teamwork
+  - Learning style
+  - A warning label if the coder has not completed the diagnostic
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `404 Not Found` | No coders with `role = "coder"` found in the given clan |
+| `500 Internal Server Error` | Supabase query failed or PDF build error |
+
+### Example
+
+```bash
+curl http://localhost:8000/generate-pdf/Alpha \
+  --output clan_alpha_report.pdf
+```
+
+<Tip>
+  Via the Node.js proxy, this endpoint is accessed at `GET /api/ai/generate-pdf/:clan` and the browser will trigger a file download automatically.
+</Tip>

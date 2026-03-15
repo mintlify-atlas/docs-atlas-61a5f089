@@ -1,0 +1,296 @@
+---
+title: "Environment variables"
+description: "Complete reference for all environment variables used by the Node.js backend and Python AI service."
+---
+
+Both backend services are configured entirely through environment variables loaded from a `.env` file in each service's root directory. Neither file should ever be committed to version control.
+
+<Warning>
+  Never commit `.env` files to Git. Add both `backend-node/.env` and `backend-python/.env` to your `.gitignore` before your first commit.
+</Warning>
+
+## Creating the files
+
+Create one `.env` file per service by copying the templates below into the respective directories:
+
+- `backend-node/.env`
+- `backend-python/.env`
+
+<Tabs>
+  <Tab title="Node.js">
+
+### Server
+
+<ParamField path="PORT" type="number" default="3000">
+  The port the Express server listens on. Change this if port 3000 is already in use on your machine.
+</ParamField>
+
+<ParamField path="NODE_ENV" type="string" default="development">
+  Runtime environment. Set to `production` on hosted deployments. Controls cookie security (`secure: true`), CORS origin strictness, and error message verbosity.
+</ParamField>
+
+### Security and sessions
+
+<ParamField path="SESSION_SECRET" type="string" required>
+  Secret used to sign the `riwi.sid` session cookie. Use a long random string (at minimum 32 characters). Changing this in production immediately invalidates all active sessions.
+</ParamField>
+
+<Warning>
+  `SESSION_SECRET` must be set to a strong, unpredictable value in production. The server falls back to `dev_secret_fallback` when it is missing, which is insecure.
+</Warning>
+
+### Database (PostgreSQL — Supabase)
+
+You can provide either a full `DATABASE_URL` connection string or the individual fields. `DATABASE_URL` takes precedence if both are set.
+
+<ParamField path="DATABASE_URL" type="string">
+  Full PostgreSQL connection string. When present, all individual `DB_*` fields are ignored. Also used by `connect-pg-simple` for the session store. Example: `postgresql://postgres.abc123:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres`
+</ParamField>
+
+<ParamField path="DB_HOST" type="string" default="localhost">
+  Postgres host. For Supabase Transaction pooler use the pooler hostname (e.g., `aws-1-us-east-1.pooler.supabase.com`).
+</ParamField>
+
+<ParamField path="DB_PORT" type="number" default="5432">
+  Postgres port.
+</ParamField>
+
+<ParamField path="DB_NAME" type="string" default="postgres">
+  Database name.
+</ParamField>
+
+<ParamField path="DB_USER" type="string">
+  Postgres user. For Supabase pooler connections, the format is `postgres.<PROJECT_ID>` (e.g., `postgres.abc123def456`).
+</ParamField>
+
+<ParamField path="DB_PASSWORD" type="string" required>
+  Postgres password.
+</ParamField>
+
+<Warning>
+  `DB_PASSWORD` is a secret credential. Never log it or expose it in error messages.
+</Warning>
+
+<ParamField path="DB_SSL" type="string" default="true">
+  Set to `false` to disable SSL when connecting to a local Postgres instance. SSL is required for all Supabase cloud connections.
+</ParamField>
+
+### Supabase
+
+<ParamField path="SUPABASE_URL" type="string" required>
+  Your Supabase project URL, found in **Project Settings → API**. Example: `https://abcdefghijkl.supabase.co`
+</ParamField>
+
+<ParamField path="SUPABASE_ANON_KEY" type="string">
+  Supabase anonymous (public) key. Used for client-side Supabase SDK calls that respect Row Level Security.
+</ParamField>
+
+<ParamField path="SUPABASE_SERVICE_KEY" type="string" required>
+  Supabase service role key. Bypasses Row Level Security — used only in server-side code. Found in **Project Settings → API → service_role**.
+</ParamField>
+
+<Warning>
+  `SUPABASE_SERVICE_KEY` bypasses all RLS policies. It must never be exposed to the browser or included in frontend code.
+</Warning>
+
+### Frontend connection
+
+<ParamField path="FRONTEND_URL" type="string" required>
+  The full origin of the frontend application. In development: `http://127.0.0.1:5500/frontend`. In production, set this to the exact origin where the frontend is hosted (e.g., `https://hecrodcode.github.io`).
+</ParamField>
+
+<Warning>
+  `FRONTEND_URL` must exactly match the origin from which the browser sends requests. A mismatch causes the CORS middleware to block all requests with a 403 error. This includes the protocol (`http` vs `https`) and any port number.
+</Warning>
+
+In development, the server additionally allows `http://localhost:5500` and `http://localhost:5173` regardless of this value.
+
+### Python AI service connection
+
+<ParamField path="PYTHON_API_URL" type="string" default="http://localhost:8000">
+  Base URL of the Python FastAPI microservice. The Node.js server forwards AI-related requests to this URL.
+</ParamField>
+
+### Social authentication (OAuth)
+
+<ParamField path="GITHUB_CLIENT_ID" type="string">
+  GitHub OAuth App client ID. OAuth is silently disabled when this is missing — no error is thrown at startup.
+</ParamField>
+
+<ParamField path="GITHUB_CLIENT_SECRET" type="string">
+  GitHub OAuth App client secret.
+</ParamField>
+
+<ParamField path="GOOGLE_CLIENT_ID" type="string">
+  Google OAuth 2.0 client ID. OAuth is silently disabled when this is missing.
+</ParamField>
+
+<ParamField path="GOOGLE_CLIENT_SECRET" type="string">
+  Google OAuth 2.0 client secret.
+</ParamField>
+
+<Info>
+  GitHub and Google OAuth are optional. When their credentials are absent the login page still works — only the social login buttons are non-functional.
+</Info>
+
+### Email (SMTP)
+
+<ParamField path="SMTP_HOST" type="string" default="smtp.gmail.com">
+  SMTP server hostname used for sending OTP verification emails.
+</ParamField>
+
+<ParamField path="SMTP_PORT" type="number" default="465">
+  SMTP port. 465 uses implicit TLS; 587 uses STARTTLS.
+</ParamField>
+
+<ParamField path="SMTP_SECURE" type="boolean" default="true">
+  Set to `true` for port 465 (implicit TLS). Set to `false` for port 587 (STARTTLS).
+</ParamField>
+
+<ParamField path="SMTP_USER" type="string">
+  The email address used as the sender account.
+</ParamField>
+
+<ParamField path="SMTP_PASS" type="string">
+  SMTP password or app-specific password. For Gmail, generate an App Password in your Google Account security settings.
+</ParamField>
+
+<ParamField path="SMTP_FROM" type="string">
+  The display name and address shown in the `From` field. Example: `Kairo <no-reply@example.com>`
+</ParamField>
+
+### MongoDB (optional)
+
+<ParamField path="MONGODB_URI" type="string">
+  MongoDB Atlas connection string. Required to enable avatar, experience, and extended profile features. Example: `mongodb+srv://user:pass@cluster.mongodb.net/`. When absent, a warning is logged and those features are disabled — the rest of the application continues running.
+</ParamField>
+
+### AI
+
+<ParamField path="RIWI_IA_KEY" type="string">
+  Internal API key used for securing requests between the Node.js gateway and the Python AI service.
+</ParamField>
+
+  </Tab>
+  <Tab title="Python">
+
+### Server
+
+<ParamField path="PORT" type="number" default="8000">
+  The port Uvicorn binds to. The nixpacks start command uses `$PORT` so Railway can inject its own port dynamically.
+</ParamField>
+
+<ParamField path="ENV" type="string" default="development">
+  Runtime environment label. Displayed in startup logs and the `/health` endpoint response.
+</ParamField>
+
+### AI model
+
+<ParamField path="OPENAI_API_KEY" type="string" required>
+  API key for the Groq API (the variable name is `OPENAI_API_KEY` for compatibility with the `groq` SDK). Obtain this from [console.groq.com](https://console.groq.com).
+</ParamField>
+
+<Warning>
+  `OPENAI_API_KEY` is a sensitive secret. Never log it or hardcode it in source files.
+</Warning>
+
+<ParamField path="MODEL_NAME" type="string" default="llama-3.3-70b-versatile">
+  The Groq model identifier used for learning plan generation, reports, exercises, and chat. The default is `llama-3.3-70b-versatile`; the project was also developed against `qwen/qwen2.5-7b-instruct`.
+</ParamField>
+
+### Supabase
+
+<ParamField path="SUPABASE_URL" type="string" required>
+  Your Supabase project URL, identical to the value used in the Node.js service.
+</ParamField>
+
+<ParamField path="SUPABASE_SERVICE_KEY" type="string" required>
+  Supabase service role key. The Python service uses this to read coder data and write generated plans directly to the database, bypassing RLS.
+</ParamField>
+
+### Cross-service origins
+
+<ParamField path="NODE_URL" type="string" default="http://localhost:3000">
+  Base URL of the Node.js backend. Added to the Python service's CORS allowed-origins list so the Node.js server can call Python endpoints from a browser context.
+</ParamField>
+
+<ParamField path="FRONTEND_URL" type="string" default="http://localhost:5500">
+  Origin of the frontend. Added to the Python CORS allowed-origins list. In production, set this to the same value used in the Node.js service.
+</ParamField>
+
+  </Tab>
+</Tabs>
+
+## Complete `.env` templates
+
+<CodeGroup>
+
+```env backend-node/.env
+# SERVER
+PORT=3000
+NODE_ENV=development
+
+# SECURITY
+SESSION_SECRET=replace_with_a_long_random_string
+
+# DATABASE
+DB_HOST=aws-1-us-east-1.pooler.supabase.com
+DB_PORT=5432
+DB_NAME=postgres
+DB_USER=postgres.your_project_id
+DB_PASSWORD=your_db_password
+DATABASE_URL=postgresql://postgres.your_project_id:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres
+
+# SUPABASE
+SUPABASE_URL=https://your_project_id.supabase.co
+SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_KEY=your_service_role_key
+
+# FRONTEND
+FRONTEND_URL=http://127.0.0.1:5500/frontend
+
+# PYTHON SERVICE
+PYTHON_API_URL=http://localhost:8000
+
+# GITHUB OAUTH (optional)
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+
+# GOOGLE OAUTH (optional)
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+
+# SMTP
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_app_password
+SMTP_FROM="Kairo <your_email@gmail.com>"
+
+# MONGODB (optional)
+MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/
+
+# AI
+RIWI_IA_KEY=your_internal_ai_key
+```
+
+```env backend-python/.env
+# SERVER
+PORT=8000
+ENV=development
+
+# AI MODEL
+OPENAI_API_KEY=your_groq_api_key
+MODEL_NAME=llama-3.3-70b-versatile
+
+# SUPABASE
+SUPABASE_URL=https://your_project_id.supabase.co
+SUPABASE_SERVICE_KEY=your_service_role_key
+
+# CROSS-SERVICE
+NODE_URL=http://localhost:3000
+FRONTEND_URL=http://localhost:5500
+```
+
+</CodeGroup>

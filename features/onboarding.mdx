@@ -1,0 +1,227 @@
+---
+title: "Coder Onboarding"
+description: "How new coders complete the soft skills assessment and learning style selection that seeds their first AI-generated plan."
+---
+
+When a coder logs in for the first time, Kairo redirects them to `onboarding.html` instead of the dashboard. Onboarding must be completed before the coder can access any other feature — the `checkOnboarding` middleware enforces this on every protected route.
+
+Onboarding has two outcomes:
+
+1. A row in `soft_skills_assessment` capturing five skill scores and a learning style.
+2. An automatic fire-and-forget request to the Python service to generate the coder's first **interpretive** learning plan.
+
+## The `first_login` flag
+
+Every user account is created with `first_login = true`. When the coder submits the onboarding quiz, the Node backend calls `PATCH /api/auth/complete-onboarding`, which flips `first_login` to `false` and optionally assigns the coder to a clan.
+
+Until `first_login` is `false`, the `checkOnboarding` middleware blocks access to all coder routes and redirects back to `onboarding.html`.
+
+## The soft skills assessment
+
+The assessment is a 20-question quiz embedded in `onboarding.html`. The frontend sends the raw answers array — score derivation happens entirely on the server in `diagnosticControllers.js`.
+
+### Five skill dimensions
+
+Each skill is scored 1–5:
+
+| Skill | Derived from answer tags |
+|---|---|
+| `autonomy` | REF (reflective) + AC (abstract conceptualization) + RO (reflective observation) |
+| `time_management` | SEQ (sequential) + AE (active experimentation) + SNS (sensing) |
+| `problem_solving` | GLO (global) + AC (abstract conceptualization) + INT (intuitive) |
+| `communication` | ACT (active) + CE (concrete experience) + VRB (verbal) |
+| `teamwork` | ACT (active) + CE (concrete experience) + SNS (sensing) |
+
+The scoring formula scales the raw tag count to the 1–5 range:
+
+```javascript
+// diagnosticControllers.js
+const scale = (count, max) =>
+  Math.min(5, Math.max(1, Math.round((count / max) * 4) + 1));
+```
+
+### Learning style selection
+
+The quiz also determines the coder's dominant learning style from the VARK model (Visual, Auditory, Reading/Writing, Kinesthetic). The server inspects the same answers array and returns one of four values — or `mixed` when no single style clears the 35% dominance threshold.
+
+| Value | Label |
+|---|---|
+| `visual` | Visual |
+| `auditory` | Auditory |
+| `kinesthetic` | Kinesthetic |
+| `mixed` | Mixed / no dominant style |
+
+The learning style is stored in `soft_skills_assessment.learning_style` and used by the AI plan generator to format every activity in the coder's plan.
+
+## Onboarding flow
+
+<Steps>
+  <Step title="Registration and OTP verification">
+    The coder registers with email and password (or via Google/GitHub OAuth). Email accounts require OTP verification before login is permitted.
+  </Step>
+  <Step title="First login redirect">
+    After a successful login, the auth controller checks `first_login`. If `true`, the coder is redirected to `onboarding.html` (`coder/onboarding.html` for social auth).
+  </Step>
+  <Step title="Complete the 20-question quiz">
+    The coder answers all 20 questions in `onboarding.html`. Each answer carries a score tag (e.g., `REF`, `ACT`, `V`, `K`) that the frontend collects into an answers array.
+  </Step>
+  <Step title="Submit answers — POST /api/diagnostics">
+    The frontend POSTs the raw answers to `POST /api/diagnostics`. The server tallies the tags, derives learning style and five skill scores, and writes a row to `soft_skills_assessment`. The response is returned immediately with `planRequested: true`.
+  </Step>
+  <Step title="Plan generation triggers in the background">
+    After responding to the frontend, the server fires an async request to the Python service at `POST /generate-plan` with `plan_type: "interpretive"`. This is fire-and-forget — the coder does not wait for it.
+  </Step>
+  <Step title="Complete onboarding — PATCH /api/auth/complete-onboarding">
+    The frontend calls this endpoint to flip `first_login = false` and optionally set the coder's clan. From this point the `checkOnboarding` middleware allows full dashboard access.
+  </Step>
+</Steps>
+
+## API reference
+
+### Submit assessment answers
+
+```
+POST /api/diagnostics
+```
+
+Requires an active session with role `coder`.
+
+**Request body**
+
+<ParamField body="answers" type="array" required>
+  Array of answer objects collected from the 20-question quiz.
+</ParamField>
+
+<ParamField body="answers[].questionId" type="number" required>
+  The question identifier.
+</ParamField>
+
+<ParamField body="answers[].optionId" type="number" required>
+  The selected option identifier.
+</ParamField>
+
+<ParamField body="answers[].score" type="string" required>
+  The score tag for the selected option (e.g., `REF`, `ACT`, `V`, `K`, `SEQ`).
+</ParamField>
+
+**Example request**
+
+```json
+{
+  "answers": [
+    { "questionId": 1, "optionId": 3, "score": "REF" },
+    { "questionId": 2, "optionId": 1, "score": "V" },
+    { "questionId": 3, "optionId": 2, "score": "ACT" }
+  ]
+}
+```
+
+**Example response**
+
+```json
+{
+  "message": "Diagnostic saved successfully",
+  "planRequested": true,
+  "diagnostic": {
+    "coderId": 42,
+    "autonomy": 3,
+    "timeManagement": 4,
+    "problemSolving": 2,
+    "communication": 4,
+    "teamwork": 3,
+    "learningStyle": "visual",
+    "assessedAt": "2026-03-15T10:00:00.000Z"
+  }
+}
+```
+
+### Complete onboarding
+
+```
+PATCH /api/auth/complete-onboarding
+```
+
+Requires an active session with role `coder`. Sets `first_login = false`.
+
+**Request body**
+
+<ParamField body="clanId" type="string">
+  The coder's clan identifier (e.g., `"Turing"`, `"Tesla"`, `"McCarthy"`). Optional — can be assigned later.
+</ParamField>
+
+**Example response**
+
+```json
+{
+  "success": true,
+  "message": "Onboarding completed."
+}
+```
+
+### Retrieve own assessment
+
+```
+GET /api/diagnostics/me
+```
+
+Returns the current coder's stored assessment.
+
+**Example response**
+
+```json
+{
+  "diagnostic": {
+    "coderId": 42,
+    "autonomy": 3,
+    "timeManagement": 4,
+    "problemSolving": 2,
+    "communication": 4,
+    "teamwork": 3,
+    "learningStyle": "visual",
+    "assessedAt": "2026-03-15T10:00:00.000Z"
+  }
+}
+```
+
+## Database table: `soft_skills_assessment`
+
+```sql
+CREATE TABLE soft_skills_assessment (
+  id              SERIAL PRIMARY KEY,
+  coder_id        INT NOT NULL UNIQUE,
+  autonomy        INT NOT NULL CHECK (autonomy BETWEEN 1 AND 5),
+  time_management INT NOT NULL CHECK (time_management BETWEEN 1 AND 5),
+  problem_solving INT NOT NULL CHECK (problem_solving BETWEEN 1 AND 5),
+  communication   INT NOT NULL CHECK (communication BETWEEN 1 AND 5),
+  teamwork        INT NOT NULL CHECK (teamwork BETWEEN 1 AND 5),
+  learning_style  learning_style_enum NOT NULL,
+  raw_answers     JSONB,
+  assessed_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (coder_id) REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `coder_id` | `INT` | One assessment per coder (`UNIQUE`) |
+| `autonomy` | `INT` | Score 1–5 |
+| `time_management` | `INT` | Score 1–5 |
+| `problem_solving` | `INT` | Score 1–5 |
+| `communication` | `INT` | Score 1–5 |
+| `teamwork` | `INT` | Score 1–5 |
+| `learning_style` | `learning_style_enum` | `visual`, `auditory`, `kinesthetic`, or `mixed` |
+| `raw_answers` | `JSONB` | The original answers array, stored for audit purposes |
+| `assessed_at` | `TIMESTAMP` | Set automatically on insert |
+
+<Note>
+  The `coder_id` column has a `UNIQUE` constraint, so each coder has exactly one assessment record. Resubmitting the quiz overwrites the existing row via the model's upsert logic.
+</Note>
+
+## How assessment results feed plan generation
+
+The `soft_skills_assessment` row is the primary input to the AI plan generator. After onboarding, the Python service reads the row and uses it in two ways:
+
+- **Learning style** — determines the format of every daily activity in the plan (e.g., a `visual` learner gets diagram-based tasks and video resources; a `kinesthetic` learner gets hands-on coding challenges from minute one).
+- **Weakest soft skill** — the skill with the lowest score becomes the `targeted_soft_skill` for the plan. Every day includes a 20-minute activity specifically designed to strengthen that skill.
+
+See [AI-generated learning plans](/features/learning-plan) for the full plan generation flow.

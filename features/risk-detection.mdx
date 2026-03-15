@@ -1,0 +1,211 @@
+---
+title: "Automated Risk Detection"
+description: "How Kairo calculates coder risk levels from soft skills and Moodle data, stores risk flags, and notifies Team Leaders."
+---
+
+Kairo automatically evaluates each coder's academic and behavioral data to assign a risk level. Team Leaders see risk badges on their dashboard and can resolve flags once the coder's situation improves.
+
+## Risk levels
+
+There are three risk levels, defined by the `risk_level_enum` type in the database:
+
+| Level | Meaning |
+|---|---|
+| `low` | Coder is on track. No intervention needed. |
+| `medium` | One risk factor is present — monitor closely. |
+| `high` | Both risk factors are present — intervention required. |
+
+## How risk is calculated
+
+Risk is calculated from two data points available in the `v_coder_risk_analysis` database view:
+
+- **`autonomy`** — the coder's soft skill score for self-direction (1–5, from `soft_skills_assessment`).
+- **`average_score`** — the coder's current academic average from Moodle (0–100, from `moodle_progress`).
+
+The logic applied in the view:
+
+```sql
+CASE 
+  WHEN ssa.autonomy <= 2 AND mp.average_score < 70 THEN 'high'
+  WHEN ssa.autonomy <= 2 OR  mp.average_score < 70 THEN 'medium'
+  ELSE 'low'
+END AS calculated_risk_level
+```
+
+In plain terms:
+- **High** — autonomy is 2 or below **and** the academic average is below 70. Both conditions must be true.
+- **Medium** — autonomy is 2 or below **or** the academic average is below 70. Either condition is enough.
+- **Low** — neither condition is met.
+
+<Note>
+  The `v_coder_risk_analysis` view also exposes `current_risk_level`, which reflects the most recent unresolved row in the `risk_flags` table (`COALESCE(rf.risk_level, 'low')`). `calculated_risk_level` is the live computed value from current data. The two may differ if a flag has not been updated since the coder's scores changed.
+</Note>
+
+## The `risk_flags` table
+
+Risk flags are persisted rows in the `risk_flags` table. Each flag captures the detected risk level, the reason text, whether it was automatically detected, and whether it has been resolved.
+
+```sql
+CREATE TABLE risk_flags (
+  id           SERIAL PRIMARY KEY,
+  coder_id     INT NOT NULL,
+  risk_level   risk_level_enum NOT NULL,
+  reason       TEXT NOT NULL,
+  auto_detected BOOLEAN DEFAULT TRUE,
+  detected_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  resolved     BOOLEAN DEFAULT FALSE,
+  resolved_at  TIMESTAMP NULL,
+  FOREIGN KEY (coder_id) REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `coder_id` | `INT` | The flagged coder. |
+| `risk_level` | `risk_level_enum` | `low`, `medium`, or `high`. |
+| `reason` | `TEXT` | Human-readable explanation of why the flag was raised. |
+| `auto_detected` | `BOOLEAN` | `true` when raised by the automated risk detector agent; `false` when raised manually. |
+| `detected_at` | `TIMESTAMP` | Set automatically on insert. |
+| `resolved` | `BOOLEAN` | `false` (open) until the TL resolves the flag. |
+| `resolved_at` | `TIMESTAMP` | Populated when `resolved` is set to `true`. |
+
+Row-level security ensures:
+- Coders can only see their own flags (`risk_own_alerts` policy).
+- TLs can see all flags across all coders (`risk_tl_sees_all` policy).
+
+## Fetching active risk flags — `GET /api/tl/risk-flags`
+
+Returns all unresolved risk flags (`resolved = false`) across all coders, ordered from most to least severe.
+
+```bash
+GET /api/tl/risk-flags
+```
+
+**Example response:**
+
+```json
+{
+  "active_risks": [
+    {
+      "id": 5,
+      "coder_id": 12,
+      "risk_level": "high",
+      "reason": "Autonomy score 2/5 and average score 61/100",
+      "auto_detected": true,
+      "detected_at": "2026-03-14T08:00:00.000Z",
+      "resolved": false,
+      "resolved_at": null,
+      "full_name": "Carlos Ruiz",
+      "email": "carlos@riwi.io"
+    },
+    {
+      "id": 3,
+      "coder_id": 19,
+      "risk_level": "medium",
+      "reason": "Average score 65/100",
+      "auto_detected": true,
+      "detected_at": "2026-03-13T09:00:00.000Z",
+      "resolved": false,
+      "resolved_at": null,
+      "full_name": "María Torres",
+      "email": "maria@riwi.io"
+    }
+  ]
+}
+```
+
+Flags are ordered by severity: `high` first, then `medium`, then `low`. The ORDER BY uses an explicit `CASE` expression rather than alphabetical comparison to guarantee correct ordering.
+
+## Dashboard risk indicators
+
+Risk information surfaces in two places on the TL dashboard:
+
+1. **Stats bar** — the `highRiskCoders` counter in the `overview` response from `GET /api/tl/dashboard` counts coders with an active `high` or `critical` flag. This appears as the red "En riesgo" card.
+2. **Risk badge** in the topbar — when `highRiskCoders > 0`, `dashboard.html` shows a warning badge (`topbar-risk-badge`) with the count.
+3. **Coder table rows** — each coder row renders their `risk_level` as a status chip. The table can be filtered to show only at-risk coders using the **En riesgo** chip filter.
+4. **Coder detail panel** — clicking a coder row shows their risk badge (`d-risk`) if their `risk_level` is set.
+
+The `getDashboardData` controller fetches `rf.risk_level` via a LEFT JOIN on `risk_flags WHERE rf.resolved = false`, so only active (unresolved) flags affect the dashboard display.
+
+## Automatic risk detection agent
+
+The `risk_detector` AI agent type (registered in `ai_agent_enum`) is responsible for programmatically raising risk flags. When the agent runs, it reads the `v_coder_risk_analysis` view, identifies coders whose `calculated_risk_level` is `medium` or `high`, and inserts rows into `risk_flags` with `auto_detected = true`.
+
+Generation events from the risk detector are logged in `ai_generation_log` with `agent_type = 'risk_detector'`.
+
+## TL notification on new risk flags
+
+When the risk detector raises a new flag or when the `getDashboardData` endpoint returns coders with active risk levels, the notification system can push a real-time alert to the TL via Server-Sent Events.
+
+The SSE stream is available at:
+
+```bash
+GET /api/notifications/stream
+```
+
+TLs can also poll their notification inbox:
+
+```bash
+GET /api/notifications
+```
+
+Individual notifications can be marked read:
+
+```bash
+POST /api/notifications/read
+```
+
+Or deleted:
+
+```bash
+DELETE /api/notifications/:id
+```
+
+## Resolving a risk flag
+
+Resolving a flag marks it as closed and records the timestamp. To resolve a flag, update the `resolved` column in `risk_flags`:
+
+```sql
+UPDATE risk_flags
+SET resolved = true, resolved_at = NOW()
+WHERE id = <flag_id>;
+```
+
+<Info>
+  Once a flag is resolved, it stops appearing in `GET /api/tl/risk-flags` results (the endpoint filters on `resolved = false`) and no longer contributes to the `highRiskCoders` count in the dashboard overview.
+</Info>
+
+## The `v_coder_risk_analysis` view
+
+The full view joins `users`, `soft_skills_assessment`, `moodle_progress`, `risk_flags`, `complementary_plans`, `plan_activities`, and `activity_progress` to produce a per-coder risk snapshot:
+
+```sql
+CREATE VIEW v_coder_risk_analysis AS
+SELECT 
+  u.id,
+  u.email,
+  u.full_name,
+  ssa.autonomy,
+  ssa.time_management,
+  mp.average_score,
+  COALESCE(rf.risk_level, 'low') AS current_risk_level,
+  CASE 
+    WHEN ssa.autonomy <= 2 AND mp.average_score < 70 THEN 'high'
+    WHEN ssa.autonomy <= 2 OR  mp.average_score < 70 THEN 'medium'
+    ELSE 'low'
+  END AS calculated_risk_level,
+  COUNT(DISTINCT pa.id) AS total_activities,
+  SUM(CASE WHEN ap.completed = TRUE THEN 1 ELSE 0 END) AS completed_activities
+FROM users u
+LEFT JOIN soft_skills_assessment ssa ON u.id = ssa.coder_id
+LEFT JOIN moodle_progress mp         ON u.id = mp.coder_id
+LEFT JOIN risk_flags rf              ON u.id = rf.coder_id AND rf.resolved = FALSE
+LEFT JOIN complementary_plans cp     ON u.id = cp.coder_id AND cp.is_active = TRUE
+LEFT JOIN plan_activities pa         ON cp.id = pa.plan_id
+LEFT JOIN activity_progress ap       ON pa.id = ap.activity_id AND ap.coder_id = u.id
+WHERE u.role = 'coder'
+GROUP BY u.id, u.email, u.full_name, ssa.autonomy, ssa.time_management,
+         mp.average_score, rf.risk_level;
+```
+
+The view also exposes `total_activities` and `completed_activities` so the TL can see activity completion rates alongside risk levels in a single query.

@@ -1,0 +1,233 @@
+---
+title: "Architecture"
+description: "How the Node.js API Gateway, Python AI Service, and static frontend work together as a distributed system."
+---
+
+Kairo is built as three independent runtime processes that communicate over HTTP. The Node.js server is the single entry point for the browser; the Python service is an internal microservice that the Node.js server calls on behalf of authenticated users; and the frontend is a static Multi-Page Application that talks only to Node.js.
+
+## System overview
+
+```
+Browser (frontend)
+    │
+    │  HTTP / REST  (port 5500 → proxied via CORS to 3000)
+    ▼
+┌─────────────────────────────────┐
+│   Node.js API Gateway           │   port 3000
+│   Express.js + Passport.js      │
+│                                 │
+│  /api/auth      authRoutes      │
+│  /api/coder     coderRoutes     │
+│  /api/tl        tlRoutes        │
+│  /api/ai        iaRoutes  ──────┼──► Python AI Service
+│  /api/profile   profileRoutes  │       port 8000
+│  /api/notif.    notifRoutes    │
+│  /api/          assignRoutes   │
+└────────────┬────────────────────┘
+             │
+             │  pg  (TLS)
+             ▼
+┌────────────────────────┐
+│  Supabase PostgreSQL   │
+│  (session store +      │
+│   application data)    │
+└────────────────────────┘
+
+
+┌─────────────────────────────────┐
+│   Python AI Service             │   port 8000
+│   FastAPI + Uvicorn v2.3.0      │
+│                                 │
+│  POST /generate-plan            │
+│  POST /generate-focus-cards     │
+│  POST /chat/ask                 │
+│  POST /generate-report          │
+│  POST /generate-exercise        │
+│  POST /exercise/{id}/submit     │
+│  POST /search-resources         │
+│  GET  /health                   │
+└────────────┬────────────────────┘
+             │
+             │  Groq API (LLM inference)
+             │  Supabase (service-role client)
+             ▼
+┌──────────────────────────────────────┐
+│  External services                   │
+│  • Groq — llama-3.3-70b-versatile    │
+│  • all-MiniLM-L6-v2 (local embeddings)│
+│  • Supabase PostgreSQL               │
+└──────────────────────────────────────┘
+```
+
+---
+
+## Runtime components
+
+<Columns cols={3}>
+  <Card title="Node.js API Gateway" icon="server">
+    The system orchestrator. Handles all browser-facing HTTP traffic, enforces authentication and authorization, persists session state in PostgreSQL, and proxies AI requests to the Python service. Built with **Express.js v5**, **Passport.js**, and **connect-pg-simple** for database-backed sessions.
+  </Card>
+  <Card title="Python AI Service" icon="microchip">
+    The AI brain. Receives structured requests from Node.js, runs LLM inference via the Groq API, performs semantic search using local sentence-transformer embeddings (`all-MiniLM-L6-v2`), and writes results back to Supabase. Built with **FastAPI** and **Uvicorn**.
+  </Card>
+  <Card title="Frontend" icon="display">
+    A static Multi-Page Application served by any HTTP file server on port 5500. Written in Vanilla JavaScript with Bootstrap 5 for layout. Makes all API calls to the Node.js gateway at port 3000. No build step required.
+  </Card>
+</Columns>
+
+---
+
+## Node.js API Gateway
+
+The gateway (`backend-node/src/server.js`) mounts eight route groups:
+
+| Mount path | Route file | Purpose |
+|---|---|---|
+| `/api/auth` | `authRoutes.js` | Registration, login, OTP verification, OAuth, logout |
+| `/api/coder` | `coderRoutes.js` | Coder dashboard, learning plans, exercises, resources |
+| `/api/tl` | `tlRoutes.js` | TL dashboard, feedback, submissions review, resource uploads |
+| `/api/ai` | `iaRoutes.js` | Proxies AI generation requests to Python service |
+| `/api/profile` | `profileRoutes.js` | User profile self-service |
+| `/api/notifications` | `notificationRoutes.js` | In-app notification delivery |
+| `/api/diagnostics` | `diagnosticRoutes.js` | Onboarding diagnostic data |
+| `/api` | `assignmentRoutes.js` | Assignment management |
+
+All routes except the public auth endpoints require a valid session cookie (`riwi.sid`). Role-based access control is enforced via the `isAuthenticated` and `hasRole` middleware:
+
+- Coder routes require `hasRole('coder')`
+- TL routes require `hasRole('tl')`
+- AI generation endpoints in `iaRoutes.js` enforce role at the individual route level — only coders can generate plans and focus cards; only TLs can generate reports
+
+### Rate limiting
+
+Two rate limiters are applied at the application level:
+
+- **Auth limiter** — 20 requests per IP per 15-minute window on authentication endpoints
+- **OTP limiter** — 5 OTP attempts per IP per 10-minute window
+
+---
+
+## Python AI Service
+
+The AI service (`backend-python/main.py`) is a standalone FastAPI application that exposes seven POST endpoints and two infrastructure endpoints:
+
+| Endpoint | Router file | Description |
+|---|---|---|
+| `POST /generate-plan` | `roadmap.py` | Generates a personalized 4-week learning roadmap |
+| `POST /generate-focus-cards` | `cards.py` | Creates prioritized focus cards (2 High / 2 Medium / 2 Low) |
+| `POST /chat/ask` | `chat.py` | AI tutor conversational endpoint |
+| `POST /generate-report` | `reports.py` | Generates a TL analytics report for a coder |
+| `POST /generate-exercise` | `exercises.py` | Generates a coding exercise |
+| `POST /exercise/{id}/submit` | `exercises.py` | Evaluates a submitted exercise solution |
+| `POST /search-resources` | `resources_search.py` | Semantic search over uploaded resources |
+| `GET /health` | inline | Health check called by Node.js and deployment probes |
+
+The service uses the `all-MiniLM-L6-v2` sentence-transformer model locally for embedding-based resource search. LLM inference is delegated to the Groq API using an OpenAI-compatible client.
+
+<Info>
+  The Python service's interactive API docs (Swagger UI) are available at `http://localhost:8000/docs` when running locally. ReDoc is at `http://localhost:8000/redoc`.
+</Info>
+
+---
+
+## How Node.js proxies AI requests
+
+The `iaRoutes.js` file defines four routes under `/api/ai`. When the frontend calls one of these, Node.js acts as a secure proxy:
+
+1. The session cookie is validated by `isAuthenticated`.
+2. Role is checked (`hasRole('coder')` or `hasRole('tl')`).
+3. The corresponding controller in `iaControllers.js` builds a payload from the authenticated user's data and forwards it to the Python service at `PYTHON_API_URL` (default `http://localhost:8000`).
+4. The Python service processes the request, writes any persistence to Supabase directly using the service-role key, and returns a JSON response.
+5. Node.js forwards the response to the browser.
+
+The browser never calls the Python service directly. `PYTHON_API_URL` should not be publicly accessible in production.
+
+<Warning>
+  In production, ensure the Python service is on a private network or behind a firewall. Only the Node.js server should be able to reach port 8000.
+</Warning>
+
+---
+
+## Authentication flow
+
+Kairo supports three authentication methods, all handled by the Node.js gateway:
+
+<Steps>
+
+<Step title="Local email / password">
+  1. User submits email and password to `POST /api/auth/register`.
+  2. Node.js hashes the password with **bcrypt** and creates the user record in Supabase.
+  3. An OTP is sent to the user's email via SMTP (configured with `SMTP_*` environment variables).
+  4. User submits the OTP to `POST /api/auth/verify-otp`.
+  5. Subsequent logins go to `POST /api/auth/login`, which creates a server-side session stored in the PostgreSQL `session` table.
+</Step>
+
+<Step title="Google OAuth">
+  1. Browser navigates to `GET /api/auth/google`.
+  2. Passport.js redirects to Google's OAuth consent screen.
+  3. Google redirects back to `GET /api/auth/google/callback`.
+  4. Passport serializes the user and creates a session.
+</Step>
+
+<Step title="GitHub OAuth">
+  1. Browser navigates to `GET /api/auth/github`.
+  2. Passport.js redirects to GitHub's OAuth authorization page.
+  3. GitHub redirects back to `GET /api/auth/github/callback`.
+  4. Passport serializes the user and creates a session.
+</Step>
+
+</Steps>
+
+Session cookies are named `riwi.sid`. In production, cookies are set with `secure: true`, `httpOnly: true`, and `sameSite: 'none'` to support cross-origin requests between the frontend CDN and backend.
+
+---
+
+## Database layer
+
+Both the Node.js gateway and the Python AI Service read from and write to the same **Supabase PostgreSQL** instance, but with different clients and different levels of privilege:
+
+| Consumer | Client | Key type | Access level |
+|---|---|---|---|
+| Node.js Gateway | `pg` (direct pool) + `@supabase/supabase-js` | Anon key | Row-level security enforced |
+| Node.js session store | `connect-pg-simple` | Direct connection string | `session` table only |
+| Python AI Service | `supabase-py` | Service role key | Full table access (bypasses RLS) |
+
+The database schema uses custom PostgreSQL `ENUM` types (`role_enum`, `risk_level_enum`, `ai_agent_enum`) to enforce data integrity at the database level. Schema files and DDL scripts are in `/database`.
+
+<Tip>
+  `DATABASE_URL` in `backend-node/.env` is used for both the `pg` connection pool and the session store. Supabase provides this as the "Transaction pooler" or "Session pooler" connection string depending on your usage pattern.
+</Tip>
+
+---
+
+## CORS configuration
+
+CORS is configured independently in each service and is driven by environment variables:
+
+**Node.js (`server.js`):**
+- In `development`: allows `http://localhost:5500` and `http://localhost:5173`
+- In `production`: restricts to the origin derived from `FRONTEND_URL`
+
+**Python (`main.py`):**
+- Always allows local dev origins (`localhost:3000`, `localhost:5500`, `127.0.0.1:5500`)
+- Reads `NODE_URL` and `FRONTEND_URL` at startup and adds their origins to the allowlist
+- Adds both `http://` and `https://` variants of each configured URL
+
+---
+
+## Environment separation
+
+Both services use an `ENV` / `NODE_ENV` variable to change runtime behavior:
+
+| Behavior | `development` | `production` |
+|---|---|---|
+| Session cookie `secure` | `false` | `true` |
+| Session cookie `sameSite` | `lax` | `none` |
+| CORS allowed origins | Hardcoded localhost | Derived from `FRONTEND_URL` |
+| Error messages in API responses | Full stack trace | `"Internal Server Error"` |
+| Node.js server reload | `nodemon` | `node src/server.js` |
+| Python server reload | `--reload` flag | No `--reload` flag |
+
+<Note>
+  Set `NODE_ENV=production` and `ENV=production` in your hosting platform's environment variables before deploying. Forgetting this leaves the API exposing detailed error messages and accepting requests from any localhost origin.
+</Note>

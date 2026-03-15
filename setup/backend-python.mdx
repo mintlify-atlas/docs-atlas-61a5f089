@@ -1,0 +1,199 @@
+---
+title: "Python AI service"
+description: "Setup and configuration of the Kairo FastAPI AI microservice."
+---
+
+The Python service (`backend-python/`) is the AI brain of the Kairo platform. It exposes a FastAPI application that generates personalized learning plans, focus cards, exercises, chat responses, TL reports, and resource search results using the Groq LLM API and local sentence embeddings.
+
+## Prerequisites
+
+- **Python 3.11** (exact version pinned in `.python-version`)
+- `pip` for package management
+- A Groq API key (obtain from [console.groq.com](https://console.groq.com))
+- Supabase project credentials — see [Database setup](/setup/database)
+- Environment variables configured — see [Environment variables](/setup/environment)
+
+<Info>
+  The project pins Python 3.11 via the `.python-version` file. Using a different minor version may cause dependency conflicts with packages like `uvloop` and `numpy`.
+</Info>
+
+## Installation and startup
+
+<Steps>
+  <Step title="Navigate to the Python service directory">
+    ```bash
+    cd backend-python
+    ```
+  </Step>
+  <Step title="Create a virtual environment">
+    <Tabs>
+      <Tab title="Linux / macOS">
+        ```bash
+        python3 -m venv env
+        source env/bin/activate
+        ```
+      </Tab>
+      <Tab title="Windows">
+        ```powershell
+        python -m venv env
+        env\Scripts\Activate.ps1
+        ```
+      </Tab>
+    </Tabs>
+    After activation, your terminal prompt shows `(env)` prefix.
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+    This installs all pinned packages including FastAPI, Uvicorn, the Groq SDK, Supabase client, and embedding libraries.
+  </Step>
+  <Step title="Create the environment file">
+    Create `backend-python/.env` with your configuration. See [Environment variables](/setup/environment) for all required values.
+  </Step>
+  <Step title="Start the server">
+    ```bash
+    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ```
+    A successful startup logs:
+    ```
+    INFO  Kairo AI Service v2.3.0  |  starting up
+    INFO  LLM model    : llama-3.3-70b-versatile
+    INFO  Embeddings   : ✓ all-MiniLM-L6-v2 (384d)
+    INFO  Environment  : development
+    INFO:     Uvicorn running on http://0.0.0.0:8000
+    ```
+  </Step>
+</Steps>
+
+## Uvicorn startup options
+
+The standard development command and its production variant differ in one flag:
+
+| Flag | Development | Production |
+|------|-------------|------------|
+| `--host` | `0.0.0.0` | `0.0.0.0` |
+| `--port` | `8000` | `$PORT` (injected by Railway) |
+| `--reload` | Yes (file watcher) | No |
+| `--workers` | 1 (default) | Set to CPU count for multi-worker deployments |
+
+```bash
+# Development
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# Production (manual)
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+## Key dependencies
+
+| Package | Version | Purpose |
+|---------|---------|--------|
+| `fastapi` | 0.115.0 | Web framework and OpenAPI documentation |
+| `uvicorn` | 0.30.6 | ASGI server |
+| `uvloop` | 0.22.1 | High-performance event loop (Linux/macOS only) |
+| `groq` | 1.1.1 | Official Groq Python SDK for LLM inference |
+| `supabase` | 2.7.4 | Supabase Python client for database access |
+| `python-dotenv` | 1.0.1 | Loads `.env` file into environment |
+| `pydantic` | 2.9.2 | Request and response data validation |
+| `fpdf2` | 2.8.1 | PDF generation for downloadable reports |
+| `pdfplumber` | 0.11.4 | PDF text extraction |
+| `numpy` | 1.26.4 | Numerical computation for embeddings |
+| `pillow` | 12.1.1 | Image processing |
+| `httpx` | 0.27.2 | Async HTTP client |
+
+## API endpoints
+
+All endpoints accept and return JSON. The interactive documentation is available at `http://localhost:8000/docs` (Swagger UI) and `http://localhost:8000/redoc` when the server is running.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/generate-plan` | Generates a personalized 4-week learning roadmap for a coder |
+| `POST` | `/generate-focus-cards` | Creates the 6 prioritized focus cards (2 high, 2 medium, 2 low) |
+| `POST` | `/chat/ask` | Conversational AI tutor endpoint |
+| `POST` | `/generate-report` | Generates an executive report for a Team Leader |
+| `POST` | `/generate-exercise` | Creates a personalized exercise for a coder |
+| `POST` | `/exercise/{id}/submit` | Evaluates and scores an exercise submission |
+| `POST` | `/search-resources` | RAG-based resource search using sentence embeddings |
+| `GET` | `/health` | Returns service status, model name, and embedding availability |
+| `GET` | `/` | Returns service version and link to docs |
+
+### Health check response
+
+```json
+{
+  "status": "online",
+  "service": "Kairo AI Engine",
+  "version": "2.3.0",
+  "model": "llama-3.3-70b-versatile",
+  "embeddings": "all-MiniLM-L6-v2 (384d)",
+  "environment": "development",
+  "endpoints": [
+    "POST /generate-plan",
+    "POST /generate-focus-cards",
+    "POST /chat/ask",
+    "POST /generate-report",
+    "POST /generate-exercise",
+    "POST /exercise/{id}/submit",
+    "POST /search-resources"
+  ]
+}
+```
+
+## Supabase connection
+
+The Python service connects to Supabase using the `supabase` Python client with the service role key. This gives it full read and write access to all tables, bypassing Row Level Security — which is necessary because the service acts on behalf of users (not as a user itself).
+
+The `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` environment variables must match the values used in the Node.js service.
+
+## Groq LLM connection
+
+The service uses the `groq` Python SDK for all LLM inference. The SDK is initialized with the `OPENAI_API_KEY` environment variable (named for compatibility reasons). The model used is controlled by `MODEL_NAME`.
+
+Default model: `llama-3.3-70b-versatile`
+
+The service also loads a local sentence embedding model (`all-MiniLM-L6-v2`, 384 dimensions) for the RAG-based resource search endpoint. The embedding model is loaded at startup; the `/health` endpoint reports whether it loaded successfully.
+
+## CORS configuration
+
+The Python service builds its allowed origins list dynamically at startup from:
+
+1. Fixed local development origins: `http://localhost:3000`, `http://localhost:5500`, `http://127.0.0.1:5500`, `http://localhost:8000`
+2. `NODE_URL` environment variable (both `http` and `https` variants)
+3. `FRONTEND_URL` environment variable (both `http` and `https` variants)
+
+Duplicates are removed while preserving order. The final list is logged at startup.
+
+## nixpacks.toml
+
+The `nixpacks.toml` file configures how Railway builds and runs the Python service:
+
+```toml
+[phases.setup]
+nixPkgs = ["python311", "python311Packages.pip"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+```
+
+| Section | Purpose |
+|---------|---------|
+| `phases.setup` | Installs Python 3.11 and pip from the Nix package manager |
+| `phases.install` | Installs all Python dependencies from `requirements.txt` |
+| `start` | Runs Uvicorn, using Railway's injected `$PORT` variable |
+
+<Info>
+  Railway injects the `$PORT` environment variable automatically. You do not need to set it manually in your Railway service configuration.
+</Info>
+
+## Interactive API documentation
+
+When running locally, FastAPI auto-generates documentation at:
+
+- **Swagger UI**: `http://localhost:8000/docs`
+- **ReDoc**: `http://localhost:8000/redoc`
+
+These are disabled in production deployments for security.

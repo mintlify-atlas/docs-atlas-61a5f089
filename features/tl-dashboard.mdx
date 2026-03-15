@@ -1,0 +1,232 @@
+---
+title: "Team Leader Dashboard"
+description: "How the TL dashboard surfaces clan metrics, coder progress, score rankings, exercise submissions, and resource uploads."
+---
+
+The Team Leader dashboard is the central view for monitoring a clan's performance. It loads automatically on login for any user with role `tl` and scopes all data to the TL's assigned clan — Turing, Tesla, or McCarthy.
+
+All TL routes require role `tl` and an active session. The Express router applies `isAuthenticated` and `hasRole('tl')` globally before any handler runs.
+
+## Dashboard views
+
+<Columns cols={2}>
+  <Card title="dashboard.html" icon="table-columns">
+    Main analytics view. Shows a stats bar, soft skills radar, learning style breakdown, coders table, exercise submissions panel, and score ranking. Clicking a coder row opens a detail panel with a feedback form.
+  </Card>
+  <Card title="group.html" icon="users">
+    Clan grouping view. Lets the TL create random groups, manual groups, or level-based groups from the coders in their clan. Used to organize pair programming or review sessions.
+  </Card>
+</Columns>
+
+## Loading the dashboard — `GET /api/tl/dashboard`
+
+This is the primary data endpoint called by `dashboard.html` on page load.
+
+**What it returns:**
+
+<ResponseField name="tl" type="object">
+  The TL's own profile.
+  <Expandable title="properties">
+    <ResponseField name="fullName" type="string">TL display name.</ResponseField>
+    <ResponseField name="clanId" type="string">The clan this TL manages (e.g., `"Turing"`).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="coders" type="array">
+  All coders in the TL's clan, each with their latest Moodle progress, soft skills scores, and unresolved risk flag.
+  <Expandable title="coder fields">
+    <ResponseField name="id" type="number">Coder user ID.</ResponseField>
+    <ResponseField name="full_name" type="string">Display name.</ResponseField>
+    <ResponseField name="email" type="string">Email address.</ResponseField>
+    <ResponseField name="first_login" type="boolean">Whether the coder has completed onboarding.</ResponseField>
+    <ResponseField name="clan_id" type="string">Clan identifier.</ResponseField>
+    <ResponseField name="kairo_score" type="number">Cumulative Kairo score for the leaderboard.</ResponseField>
+    <ResponseField name="average_score" type="number">Moodle academic average (0–100).</ResponseField>
+    <ResponseField name="current_week" type="number">The module week the coder is currently on.</ResponseField>
+    <ResponseField name="autonomy" type="number">Soft skill score 1–5.</ResponseField>
+    <ResponseField name="time_management" type="number">Soft skill score 1–5.</ResponseField>
+    <ResponseField name="problem_solving" type="number">Soft skill score 1–5.</ResponseField>
+    <ResponseField name="communication" type="number">Soft skill score 1–5.</ResponseField>
+    <ResponseField name="teamwork" type="number">Soft skill score 1–5.</ResponseField>
+    <ResponseField name="learning_style" type="string">`visual`, `auditory`, `kinesthetic`, or `mixed`.</ResponseField>
+    <ResponseField name="risk_level" type="string">The coder's active unresolved risk flag: `low`, `medium`, or `high`. `null` if none.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="overview" type="object">
+  Aggregated clan statistics.
+  <Expandable title="properties">
+    <ResponseField name="totalCoders" type="number">Total coders in the clan.</ResponseField>
+    <ResponseField name="completedOnboarding" type="number">Coders who have `first_login = false`.</ResponseField>
+    <ResponseField name="pendingOnboarding" type="number">Coders still on their first login.</ResponseField>
+    <ResponseField name="highRiskCoders" type="number">Coders with a `high` or `critical` risk flag.</ResponseField>
+    <ResponseField name="clanAvgScore" type="number">Average Kairo score across all clan coders.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="softSkillsAverage" type="object">
+  Mean value (1–5) for each soft skill dimension, computed only over coders who have completed the onboarding assessment.
+</ResponseField>
+
+**Example response:**
+
+```json
+{
+  "tl": { "fullName": "Ana Gómez", "clanId": "Turing" },
+  "coders": [
+    {
+      "id": 12,
+      "full_name": "Carlos Ruiz",
+      "email": "carlos@riwi.io",
+      "first_login": false,
+      "clan_id": "Turing",
+      "kairo_score": 180,
+      "average_score": 74.5,
+      "current_week": 3,
+      "autonomy": 2,
+      "time_management": 3,
+      "problem_solving": 4,
+      "communication": 3,
+      "teamwork": 4,
+      "learning_style": "kinesthetic",
+      "risk_level": "medium"
+    }
+  ],
+  "overview": {
+    "totalCoders": 8,
+    "completedOnboarding": 7,
+    "pendingOnboarding": 1,
+    "highRiskCoders": 1,
+    "clanAvgScore": 142
+  },
+  "softSkillsAverage": {
+    "autonomy": 2.9,
+    "time_management": 3.4,
+    "problem_solving": 3.1,
+    "communication": 3.7,
+    "teamwork": 3.6
+  }
+}
+```
+
+## Clan filtering
+
+All dashboard data is automatically scoped to the TL's clan. The `getDashboardData` controller resolves the TL's `clan` field from the `users` table and uses it as a filter on every downstream query — no clan parameter is accepted from the client.
+
+The three clans in Kairo are:
+
+| Clan | Description |
+|---|---|
+| `Turing` | Named after Alan Turing |
+| `Tesla` | Named after Nikola Tesla |
+| `McCarthy` | Named after John McCarthy |
+
+In `group.html`, the TL can see all coders in their clan and arrange them into subgroups using three modes: random, manual, or by level (based on `kairo_score`).
+
+## Coder score history — `GET /api/tl/coder/:id/score`
+
+Returns the score event history for a specific coder, including each event type, points delta, and timestamp.
+
+<ParamField path="id" type="number" required>
+  The coder's user ID.
+</ParamField>
+
+**Example response:**
+
+```json
+{
+  "coderId": 12,
+  "currentScore": 180,
+  "history": [
+    { "label": "TL aprobó solución", "points": 15, "createdAt": "2026-03-14T16:30:00.000Z" },
+    { "label": "Día completado", "points": 10, "createdAt": "2026-03-13T11:00:00.000Z" },
+    { "label": "Ejercicio enviado", "points": 5, "createdAt": "2026-03-12T09:45:00.000Z" }
+  ]
+}
+```
+
+The `label` field is a human-readable description derived from the `event_type` column of the `score_events` table:
+
+| `event_type` | Label |
+|---|---|
+| `day_complete` | Día completado |
+| `exercise_submit` | Ejercicio enviado |
+| `tl_approved` | TL aprobó solución |
+| `plan_complete` | Plan completado (bonus) |
+| `inactivity` | Días sin actividad |
+
+## Leaderboard — `GET /api/tl/ranking`
+
+Returns both a clan-scoped ranking and a global top-10 ranking.
+
+**Example response:**
+
+```json
+{
+  "clan": "Turing",
+  "clanRanking": [
+    { "id": 12, "full_name": "Carlos Ruiz", "kairo_score": 180, "clan": "Turing", "rank": 1 },
+    { "id": 15, "full_name": "Sara López", "kairo_score": 155, "clan": "Turing", "rank": 2 }
+  ],
+  "globalRanking": [
+    { "id": 12, "full_name": "Carlos Ruiz", "kairo_score": 180, "clan": "Turing", "rank": 1 },
+    { "id": 7,  "full_name": "Juan Pérez",  "kairo_score": 210, "clan": "Tesla",  "rank": 1 }
+  ]
+}
+```
+
+The clan ranking uses a `RANK() OVER (ORDER BY kairo_score DESC)` window function and only includes active coders (`is_active = true`). The global ranking is capped at 10 results.
+
+The ranking table is rendered in `dashboard.html` below the submissions panel.
+
+## Exercise submissions — `GET /api/tl/submissions`
+
+Returns up to 50 of the most recent exercise submissions from coders in the TL's clan, ordered by `submitted_at DESC`.
+
+Each submission row includes the submitted code, the expected output, the exercise title and difficulty, the coder's name, and any existing TL feedback text.
+
+**Example response:**
+
+```json
+{
+  "submissions": [
+    {
+      "id": 88,
+      "code_submitted": "SELECT * FROM users WHERE clan = 'Turing';",
+      "submitted_at": "2026-03-15T10:00:00.000Z",
+      "tl_feedback_text": null,
+      "reviewed_at": null,
+      "exercise_title": "SELECT with WHERE clause",
+      "language": "sql",
+      "difficulty": "medium",
+      "expected_output": "Returns all Turing coders",
+      "coder_name": "Carlos Ruiz",
+      "coder_id": 12
+    }
+  ]
+}
+```
+
+From the submissions panel in `dashboard.html`, the TL can open a review modal to write feedback. Submitting feedback calls `POST /api/tl/submissions/:id/review` (see [TL feedback](/features/feedback)).
+
+## Resource upload — `POST /api/tl/resource/upload`
+
+TLs can upload PDF materials that are indexed into the RAG (Retrieval-Augmented Generation) system and made available to coders in their clan.
+
+<Warning>
+  Only PDF files are accepted. Files larger than 20 MB are rejected. The multer middleware enforces both constraints before the request reaches the controller.
+</Warning>
+
+**Request format:** `multipart/form-data`
+
+<ParamField body="file" type="file" required>
+  The PDF file to upload. Must have MIME type `application/pdf` and be at most 20 MB.
+</ParamField>
+
+After upload, the file is stored and its content is indexed by the Python embedding service. The embedding processing runs asynchronously in the background — the upload endpoint returns immediately.
+
+The TL can also:
+- **List uploaded resources** — `GET /api/tl/resource/list`
+- **Delete a resource** — `DELETE /api/tl/resource/:resourceId`
+
+Uploaded resources appear in `assignment.html` alongside assigned activities in the shared grid view. Coders can search these resources through the RAG endpoint (`POST /api/coder/resources/search`).

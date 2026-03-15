@@ -1,0 +1,200 @@
+---
+title: "Database overview"
+description: "PostgreSQL on Supabase — architecture, connection types, entity relationships, and RLS design."
+---
+
+Kairo uses **PostgreSQL 14+** hosted on [Supabase](https://supabase.com) as its primary data store. All application data — users, learning plans, activity progress, AI-generated reports, and audit logs — lives in a single PostgreSQL database enforced by Row Level Security (RLS).
+
+## Creating a Supabase project
+
+<Steps>
+  <Step title="Create a new project">
+    Go to [supabase.com](https://supabase.com), create an account, and click **New project**. Choose a region close to your users and set a strong database password.
+  </Step>
+  <Step title="Retrieve your credentials">
+    From the Supabase dashboard, navigate to **Project Settings → Database** and **Project Settings → API**. You will need:
+
+    - **Database connection string** (under *Connection string → URI*) for the Node.js pg pool
+    - **Project URL** (`SUPABASE_URL`) for the Supabase JS client
+    - **Anon key** (`SUPABASE_ANON_KEY`) for RLS-protected client queries
+    - **Service role key** (`SUPABASE_SERVICE_KEY`) for server-side admin operations that bypass RLS
+  </Step>
+  <Step title="Apply the schema">
+    Open the **SQL Editor** in your Supabase dashboard and run `schema.sql` in full. See [Migrations](/database/migrations) for step-by-step instructions.
+  </Step>
+  <Step title="Apply RLS policies">
+    In the same SQL Editor, run `rls_policies.sql`. This enables Row Level Security on every table and creates all access policies.
+  </Step>
+</Steps>
+
+## Connection types
+
+Kairo uses three distinct connection methods depending on the service and the required permission level.
+
+<Tabs>
+  <Tab title="Node.js pg pool">
+    The Node.js backend uses the `pg` library with a connection pool. It connects directly to the PostgreSQL wire protocol and is used for all server-side business logic queries.
+
+    ```javascript
+    // backend-node/src/config/database.js
+    import pkg from 'pg';
+    const { Pool } = pkg;
+
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }, // required for Supabase cloud
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 30000,
+    });
+    ```
+
+    Configure via environment variables:
+
+    | Variable | Description |
+    |---|---|
+    | `DATABASE_URL` | Full PostgreSQL connection URI (takes precedence over individual `DB_*` vars) |
+    | `DB_HOST` | Database host (e.g., `aws-1-us-east-1.pooler.supabase.com`) |
+    | `DB_PORT` | Port (default `5432`) |
+    | `DB_NAME` | Database name (default `postgres`) |
+    | `DB_USER` | User in the format `postgres.PROJECT_ID` for Supabase pooler |
+    | `DB_PASSWORD` | Database password |
+    | `DB_SSL` | Set to `false` for local Postgres; leave unset for Supabase cloud |
+
+    <Warning>
+      For Supabase's connection pooler, format the user as `postgres.PROJECT_ID` and use host `aws-1-us-east-1.pooler.supabase.com`.
+    </Warning>
+  </Tab>
+  <Tab title="Supabase JS client (anon key)">
+    Used when queries must respect RLS policies — for example, when a coder fetches their own data directly from the frontend or through a thin API layer. The anon key only grants access permitted by the active RLS policies.
+
+    ```javascript
+    import { createClient } from '@supabase/supabase-js';
+
+    const supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY
+    );
+    ```
+
+    <Note>
+      Queries made with the anon key are automatically filtered by RLS. A coder can only read their own rows; a TL can read all rows in their permitted tables.
+    </Note>
+  </Tab>
+  <Tab title="Supabase JS client (service role key)">
+    The Python AI microservice uses the Supabase JS client initialised with the **service role key**. This key bypasses RLS entirely and is intended for trusted server-side operations such as generating AI plans, writing risk flags, and inserting AI reports.
+
+    ```javascript
+    // backend-node/src/config/supabase.js
+    import { createClient } from '@supabase/supabase-js';
+
+    export const supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+    ```
+
+    <Warning>
+      Never expose the service role key in client-side code or public repositories. It grants unrestricted read and write access to all tables.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Entity relationship overview
+
+The schema is organized into four functional domains.
+
+<CardGroup cols={2}>
+  <Card title="Users & skills" icon="users">
+    `users` is the root entity. Every coder has exactly one `soft_skills_assessment` record (created during onboarding) and an optional `user_profiles` record for extended personal details.
+  </Card>
+  <Card title="Academic content" icon="book">
+    `modules` defines the bootcamp curriculum. Each module has many `topics`. Coder academic progress is tracked per module in `moodle_progress`, and specific struggling topics are recorded in `coder_struggling_topics`.
+  </Card>
+  <Card title="Personalized plans" icon="list-check">
+    Each coder can have multiple `complementary_plans` (the AI-generated 6-card system). Each plan contains `plan_activities` (daily tasks). Coder engagement is stored in `activity_progress`, and supporting evidence in `evidence_submissions`.
+  </Card>
+  <Card title="Communication & intelligence" icon="brain">
+    Team leaders send feedback via `tl_feedback`. The AI risk detector writes to `risk_flags`. AI-generated executive reports live in `ai_reports`. Every AI invocation is audited in `ai_generation_log`.
+  </Card>
+</CardGroup>
+
+### Relationship diagram
+
+```
+users
+  ├── soft_skills_assessment     (1:1)
+  ├── user_profiles              (1:1, optional)
+  ├── moodle_progress            (1:N, one per module)
+  ├── coder_struggling_topics    (N:M with topics)
+  ├── complementary_plans        (1:N)
+  │     └── plan_activities      (1:N)
+  │           ├── activity_progress    (1:1 per coder)
+  │           └── evidence_submissions (1:N)
+  ├── tl_feedback                (1:N, coder receives)
+  ├── risk_flags                 (1:N)
+  └── ai_generation_log          (1:N)
+
+modules
+  ├── topics                     (1:N)
+  └── moodle_progress            (1:N)
+
+ai_reports                       (standalone, targets coder | clan | cohort)
+```
+
+## Enum types
+
+The schema defines eight PostgreSQL enum types that constrain column values.
+
+| Enum | Values | Used in |
+|---|---|---|
+| `role_enum` | `coder`, `tl` | `users.role` |
+| `learning_style_enum` | `visual`, `auditory`, `kinesthetic`, `mixed` | `soft_skills_assessment.learning_style` |
+| `activity_type_enum` | `guided`, `semi_guided`, `autonomous` | `plan_activities.activity_type` |
+| `feedback_type_enum` | `weekly`, `activity`, `general` | `tl_feedback.feedback_type` |
+| `risk_level_enum` | `low`, `medium`, `high` | `risk_flags.risk_level`, `ai_reports.risk_level` |
+| `report_target_enum` | `coder`, `clan`, `cohort` | `ai_reports.target_type` |
+| `ai_agent_enum` | `learning_plan`, `report_generator`, `risk_detector` | `ai_generation_log.agent_type` |
+| `priority_level_enum` | `low`, `medium`, `high` | `complementary_plans.priority_level` |
+
+## How RLS works in this project
+
+Row Level Security is enabled on every table. Supabase evaluates each RLS policy automatically on every query — there is no application-level filtering needed when using the anon key client.
+
+### Policy model
+
+Policies use two JWT claims injected by Supabase Auth:
+
+- `auth.uid()` — the numeric user ID of the authenticated user
+- `auth.jwt()->>'role'` — the `role` field from the JWT payload (`'coder'` or `'tl'`)
+
+### Access rules by role
+
+| Resource | Coder | Team Leader |
+|---|---|---|
+| `users` | Read and update own row | Read all rows |
+| `soft_skills_assessment` | Read and update own row | Read all rows |
+| `modules` | Read all | Read all, create, update |
+| `moodle_progress` | Read and update own row | Read all rows |
+| `topics` | Read all | Read all, create |
+| `coder_struggling_topics` | Read, insert, delete own | Read all |
+| `complementary_plans` | Read own | Read all, create, update |
+| `plan_activities` | Read activities from own plans | Read all, create |
+| `activity_progress` | Read, insert, update own | Read all |
+| `evidence_submissions` | Read, insert own | Read all |
+| `tl_feedback` | Read received, mark as read | Read sent, create, update |
+| `risk_flags` | Read own | Read all |
+| `ai_reports` | No access | Read all |
+| `ai_generation_log` | No access | Read all |
+
+<Note>
+  The Node.js backend uses the pg pool with database-level credentials, not Supabase Auth JWTs. These connections bypass RLS. Only use service-role or direct pg connections in trusted server-side code.
+</Note>
+
+### Common RLS errors
+
+| Error | Cause | Fix |
+|---|---|---|
+| `permission denied for table` | No matching RLS policy for the current role | Check `rls_policies.sql` for the table and role |
+| Returns empty result set | RLS filters all rows | Verify the JWT contains the correct `role` claim |
+| `new row violates row-level security policy` | INSERT blocked by `WITH CHECK` clause | Ensure `coder_id` or `tl_id` matches `auth.uid()` |

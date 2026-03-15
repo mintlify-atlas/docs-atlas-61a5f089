@@ -1,0 +1,189 @@
+---
+title: "TL Feedback System"
+description: "How Team Leaders send typed feedback to coders, review exercise submissions, and how coders are notified and mark feedback as read."
+---
+
+Team Leaders can send feedback messages directly to individual coders and leave written reviews on submitted exercises. Coders receive real-time notifications and see unread feedback highlighted in their notification bell.
+
+## Sending feedback — `POST /api/tl/feedback`
+
+The TL sends a message to a specific coder by POSTing to this endpoint from the coder detail panel in `dashboard.html`.
+
+**Required role:** `tl`
+
+**Request body:**
+
+<ParamField body="coderId" type="number" required>
+  The user ID of the coder receiving the feedback.
+</ParamField>
+
+<ParamField body="feedbackText" type="string" required>
+  The feedback message. Input is sanitized server-side before storage.
+</ParamField>
+
+<ParamField body="feedbackType" type="string" required>
+  One of three values: `weekly`, `activity`, or `general`. See [feedback types](#feedback-types) below.
+</ParamField>
+
+**Example request:**
+
+```json
+{
+  "coderId": 12,
+  "feedbackText": "Great improvement on JOINs this week. Focus next on subqueries.",
+  "feedbackType": "weekly"
+}
+```
+
+**Example response:**
+
+```json
+{
+  "success": true,
+  "message": "Feedback registered",
+  "data": {
+    "id": 34,
+    "coder_id": 12,
+    "tl_id": 3,
+    "feedback_text": "Great improvement on JOINs this week. Focus next on subqueries.",
+    "feedback_type": "weekly",
+    "is_read": false,
+    "created_at": "2026-03-15T14:00:00.000Z"
+  }
+}
+```
+
+After saving the feedback row, the controller fetches the TL's `full_name` and calls `notifyUser()` to push a real-time notification to the coder:
+
+```javascript
+await notifyUser(
+  coderId,
+  'Nuevo Feedback Requerido',
+  `${tlName} te ha dejado un feedback: "${feedbackText.substring(0, 50)}..."`,
+  'feedback',
+  result.rows[0].id
+);
+```
+
+## Feedback types
+
+The `feedback_type_enum` defines three categories:
+
+| Type | When to use |
+|---|---|
+| `weekly` | End-of-week summary of the coder's overall performance. |
+| `activity` | Tied to a specific plan activity or exercise. |
+| `general` | Freeform note — motivational, a warning, or general guidance. |
+
+## The `tl_feedback` table
+
+```sql
+CREATE TABLE tl_feedback (
+  id            SERIAL PRIMARY KEY,
+  coder_id      INT NOT NULL,
+  tl_id         INT NOT NULL,
+  plan_id       INT,
+  feedback_text TEXT NOT NULL,
+  feedback_type feedback_type_enum,
+  is_read       BOOLEAN DEFAULT FALSE,
+  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (coder_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (tl_id)    REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (plan_id)  REFERENCES complementary_plans(id) ON DELETE SET NULL
+);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `coder_id` | `INT` | The coder who receives the feedback. |
+| `tl_id` | `INT` | The TL who sent it. |
+| `plan_id` | `INT` | Optional reference to a learning plan if the feedback is activity-scoped. `NULL` for general or weekly feedback. |
+| `feedback_text` | `TEXT` | The sanitized message body. |
+| `feedback_type` | `feedback_type_enum` | `weekly`, `activity`, or `general`. |
+| `is_read` | `BOOLEAN` | Defaults to `false`. Flipped to `true` when the coder reads the message. |
+| `created_at` | `TIMESTAMP` | Set automatically on insert. |
+
+Two composite indexes support efficient queries:
+- `idx_feedback_coder` on `coder_id` — for loading a coder's received feedback.
+- `idx_feedback_coder_unread` on `(coder_id, is_read)` — for the unread notification count.
+
+## Row-level security
+
+The `tl_feedback` table uses Supabase RLS with four policies:
+
+| Policy | Who | Operation |
+|---|---|---|
+| `feedback_own_feedback` | Coders | `SELECT` — a coder can only read feedback addressed to them. |
+| `feedback_tl_sends` | TLs | `SELECT` — a TL can read all feedback they created. |
+| `feedback_tl_create` | TLs | `INSERT` — only a TL can create feedback, and `tl_id` must match their own ID. |
+| `feedback_coder_mark_read` | Coders | `UPDATE` — a coder can update `is_read` on their own feedback rows. |
+
+## The notification bell
+
+The `is_read` flag drives the red dot on the coder's notification bell. When `is_read = false`, the dot is visible. When the coder opens the notification panel and views the feedback, the frontend calls the read endpoint to clear the indicator.
+
+From the coder's dashboard, the `notif-dot` element in the topbar is shown or hidden based on the count of unread notifications fetched from `GET /api/notifications`.
+
+## Reviewing exercise submissions — `POST /api/tl/submissions/:id/review`
+
+The TL can leave written feedback on a specific exercise submission from the submissions panel in `dashboard.html`. The review modal displays the submitted code, the expected output, and a text field for the TL's feedback.
+
+**Required role:** `tl`
+
+<ParamField path="id" type="number" required>
+  The `exercise_submissions` row ID.
+</ParamField>
+
+<ParamField body="feedbackText" type="string" required>
+  The TL's written review of the submission.
+</ParamField>
+
+**What happens on submission:**
+
+<Steps>
+  <Step title="Authorization check">
+    The controller verifies that the submission belongs to a coder in the TL's clan by joining `exercise_submissions → exercises → users → users (TL)` on `clan`. If the submission is not in the TL's clan, the request returns HTTP 404.
+  </Step>
+  <Step title="Feedback is saved">
+    The `tl_feedback_text`, `reviewed_at`, and `reviewed_by` columns on the `exercise_submissions` row are updated.
+  </Step>
+  <Step title="Coder earns bonus points">
+    `awardPoints(coder_id, 'tl_approved', submissionId)` awards +15 points to the coder's Kairo score for having their work reviewed.
+  </Step>
+  <Step title="Coder is notified">
+    A real-time notification is dispatched to the coder with the exercise title and the first 60 characters of the feedback text.
+  </Step>
+</Steps>
+
+**Example request:**
+
+```json
+{
+  "feedbackText": "Good query structure. Consider using an index on the `clan` column for performance."
+}
+```
+
+**Example response:**
+
+```json
+{
+  "success": true,
+  "submission": {
+    "id": 88,
+    "tl_feedback_text": "Good query structure. Consider using an index on the `clan` column for performance.",
+    "reviewed_at": "2026-03-15T15:00:00.000Z"
+  }
+}
+```
+
+## Coders reading feedback — `PATCH /api/coder/feedback/:id/read`
+
+Coders mark individual feedback messages as read by calling this endpoint. It flips `is_read` to `true` on the specified `tl_feedback` row.
+
+**Required role:** `coder`
+
+<ParamField path="id" type="number" required>
+  The `tl_feedback` row ID.
+</ParamField>
+
+This endpoint enforces the `feedback_coder_mark_read` RLS policy, which only allows a coder to update rows where `coder_id` matches their own ID.

@@ -1,0 +1,85 @@
+---
+title: "AI tutor chat"
+description: "Stateless AI tutor endpoint that answers coder programming questions using the Groq LLM."
+---
+
+<Note>
+  This endpoint can be called directly from the browser chat widget or via the Node.js proxy at `POST /api/ai/chat/ask`.
+</Note>
+
+## POST /chat/ask
+
+Answers a programming question from a coder using the Groq LLM. The endpoint is stateless — no conversation history is stored or forwarded to the model. Each request is a fresh, single-turn interaction.
+
+### Request body
+
+<ParamField body="message" type="string" required>
+  The question or message from the coder. Cannot be empty or whitespace-only.
+</ParamField>
+
+<ParamField body="coder_id" type="integer">
+  The coder's user ID. Optional — not used in the LLM call but may be logged for future context features.
+</ParamField>
+
+### System prompt
+
+The following system prompt is sent to the model on every request:
+
+```text
+You are Kairo, an expert coding tutor at Riwi bootcamp. You help students
+with programming questions in a concise, motivating, and practical way.
+Always give a short answer first, then explain if needed.
+Use simple language. Max 3 paragraphs.
+```
+
+### LLM configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Model | `MODEL_NAME` env var, default `llama-3.3-70b-versatile` |
+| Provider | Groq (`GROQ_API_KEY`) |
+| `max_tokens` | `600` |
+| `temperature` | `0.7` |
+| Conversation history | None — stateless |
+
+<Info>
+  The model can be changed at runtime by setting the `MODEL_NAME` environment variable. The default is `llama-3.3-70b-versatile`.
+</Info>
+
+### Response — 200 OK
+
+<ResponseField name="reply" type="string">
+  The AI tutor's response text. Always a plain string — no structured JSON is returned by the model.
+</ResponseField>
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | `message` is empty or contains only whitespace |
+| `500 Internal Server Error` | Groq API call failed or raised an exception |
+
+<Warning>
+  A `500` response with `"AI tutor temporarily unavailable"` means the Groq API is unreachable or the `GROQ_API_KEY` environment variable is not set. The full exception is logged server-side.
+</Warning>
+
+### Stateless design
+
+The `/chat/ask` endpoint does not maintain any session state. Each call sends exactly two messages to the model: the system prompt and the current user message. Previous exchanges in the chat widget are rendered client-side only and are not re-submitted to the model.
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/chat/ask \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "What is the difference between INNER JOIN and LEFT JOIN?",
+    "coder_id": 42
+  }'
+```
+
+```json
+{
+  "reply": "An INNER JOIN returns only the rows where there is a match in both tables. A LEFT JOIN returns all rows from the left table, plus any matching rows from the right table — if there is no match, the right-side columns are NULL.\n\nUse INNER JOIN when you only need records that exist in both tables. Use LEFT JOIN when you want to keep all records from the left table even if there is no corresponding record on the right side — for example, listing all coders and their scores, including coders with no score yet."
+}
+```

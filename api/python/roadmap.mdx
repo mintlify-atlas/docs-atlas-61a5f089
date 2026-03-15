@@ -1,0 +1,213 @@
+---
+title: "Learning plan generation"
+description: "Generates a personalized 20-day learning plan using the Groq LLM, personalized to the coder's soft skills profile and module progress."
+---
+
+<Note>
+  Called internally by the Node.js proxy — not called directly from the browser. The Node.js server forwards a pre-built payload to this endpoint after enriching it with database context.
+</Note>
+
+## POST /generate-plan
+
+Generates a personalized 4-week complementary learning plan for a coder. The endpoint selects one of two generation strategies based on `plan_type`, calls the Groq LLM (`llama-3.3-70b-versatile` by default), persists the plan and its activities to Supabase, and returns the full plan JSON with metadata.
+
+### Request body
+
+<ParamField body="coder_id" type="integer" required>
+  The coder's user ID from the `users` table.
+</ParamField>
+
+<ParamField body="module_id" type="integer" required>
+  The module to generate a plan for. Must exist in the `modules` table.
+</ParamField>
+
+<ParamField body="plan_type" type="string">
+  Generation strategy. One of `"interpretive"` (default) or `"analytical"`. See [Plan types](#plan-types) for the difference.
+</ParamField>
+
+<ParamField body="current_week" type="integer">
+  The coder's current week in the module. Defaults to `1`.
+</ParamField>
+
+<ParamField body="average_score" type="float">
+  The coder's average Moodle score (0–100). Defaults to `0.0`. For `analytical` plans, this is auto-fetched from `moodle_progress` if not provided.
+</ParamField>
+
+<ParamField body="struggling_topics" type="array">
+  List of topic names the coder is struggling with. Defaults to `[]`. Auto-fetched for `analytical` plans when not provided.
+</ParamField>
+
+<ParamField body="weeks_completed" type="array">
+  Array of week progress objects from Moodle. Defaults to `[]`. Auto-fetched for `analytical` plans when not provided.
+</ParamField>
+
+### Plan types
+
+| Plan type | Description |
+|-----------|-------------|
+| `interpretive` | Uses only soft skills and module structure. Suitable for new coders or when Moodle data is unavailable. |
+| `analytical` | Incorporates `average_score`, `struggling_topics`, and `weeks_completed` to produce a data-driven remediation plan. If these fields are not sent in the request body, they are auto-fetched from the `moodle_progress` table. |
+
+<Tip>
+  For `analytical` plans, you can omit `average_score`, `struggling_topics`, and `weeks_completed` entirely. The service will automatically query the latest `moodle_progress` row for the coder.
+</Tip>
+
+### Generation flow
+
+<Steps>
+  <Step title="Validate plan type">
+    Rejects the request immediately with `400` if `plan_type` is not `"interpretive"` or `"analytical"`.
+  </Step>
+  <Step title="Fetch soft skills">
+    Queries the `soft_skills_assessment` table for the coder. Raises `400` if no diagnostic record is found — the coder must complete onboarding before a plan can be generated.
+  </Step>
+  <Step title="Fetch module, weeks, and topics">
+    Queries the `modules`, `weeks`, and `topics` tables for the given `module_id`. Raises `404` if the module does not exist.
+  </Step>
+  <Step title="Fetch coder name">
+    Queries the `users` table to retrieve `full_name` for personalizing the LLM prompt.
+  </Step>
+  <Step title="Auto-fetch Moodle progress (analytical only)">
+    If `plan_type` is `"analytical"` and `average_score` is `0.0` with no `weeks_completed`, the service fetches the latest row from `moodle_progress` and populates `average_score`, `struggling_topics`, `weeks_completed`, and `current_week` automatically.
+  </Step>
+  <Step title="Deactivate previous plans">
+    Sets `is_active = false` on all existing active plans for the coder in `complementary_plans`.
+  </Step>
+  <Step title="Build LLM context">
+    Assembles the prompt context from soft skills, module data, and (for `analytical`) Moodle progress. The appropriate prompt builder is selected based on `plan_type`.
+  </Step>
+  <Step title="Call Groq LLM">
+    Sends the prompt to the Groq API using the model set in `MODEL_NAME` (default: `llama-3.3-70b-versatile`). Generation uses `temperature=0.7` and `max_tokens=8192` with `response_format={"type": "json_object"}`. If the call fails, a safe fallback plan structure is returned so the DB insert never crashes.
+  </Step>
+  <Step title="Save plan and activities">
+    Inserts a row into `complementary_plans` with the plan JSON, soft skills snapshot, Moodle status snapshot, and the targeted soft skill. Then populates `plan_activities` — up to two rows per day (one `technical`, one `soft_skill`), up to 40 rows total — so TLs can query per-coder activity data.
+  </Step>
+  <Step title="Log generation">
+    Inserts a row into `ai_generation_log` with the input payload, output plan ID, execution time in milliseconds, and whether the result was a fallback.
+  </Step>
+</Steps>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  `true` when plan generation succeeded.
+</ResponseField>
+
+<ResponseField name="plan_id" type="integer | null">
+  Database ID of the persisted plan in `complementary_plans`. `null` if the Supabase insert failed.
+</ResponseField>
+
+<ResponseField name="plan" type="object">
+  The AI-generated plan JSON object.
+  <Expandable title="properties">
+    <ResponseField name="plan_type" type="string">
+      The plan type used (`"interpretive"` or `"analytical"`).
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      `"ok"` on success. `"fallback"` if the LLM call or JSON parsing failed.
+    </ResponseField>
+    <ResponseField name="targeted_soft_skill" type="string">
+      The soft skill the plan focuses on (e.g. `"autonomy"`, `"time_management"`).
+    </ResponseField>
+    <ResponseField name="learning_style_applied" type="string">
+      The learning style used to personalize activities (e.g. `"visual"`, `"kinesthetic"`, `"mixed"`).
+    </ResponseField>
+    <ResponseField name="summary" type="string">
+      A short description of the plan goals.
+    </ResponseField>
+    <ResponseField name="weeks" type="array">
+      Array of 4 week objects, each containing a `week_number`, `focus`, and a `days` array with `technical_activity` and `soft_skill_activity` per day.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="metadata" type="object">
+  Generation metadata.
+  <Expandable title="properties">
+    <ResponseField name="plan_type" type="string">The plan type used.</ResponseField>
+    <ResponseField name="coder_id" type="integer">The coder's user ID.</ResponseField>
+    <ResponseField name="module_id" type="integer">The module ID used for generation.</ResponseField>
+    <ResponseField name="module_name" type="string">The human-readable module name.</ResponseField>
+    <ResponseField name="current_week" type="integer">The week number used as the starting point.</ResponseField>
+    <ResponseField name="execution_ms" type="integer">Total execution time in milliseconds from request receipt to response.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `400 Bad Request` | `plan_type` is not `"interpretive"` or `"analytical"` |
+| `400 Bad Request` | No `soft_skills_assessment` record found for the coder (onboarding incomplete) |
+| `404 Not Found` | `module_id` does not exist in the `modules` table |
+
+<Warning>
+  If the Groq LLM call fails or returns unparseable JSON, the endpoint still returns `200` but with `plan.status = "fallback"` and an empty `weeks` array. The plan is still persisted to Supabase with the fallback structure.
+</Warning>
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/generate-plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "coder_id": 42,
+    "module_id": 3,
+    "plan_type": "analytical"
+  }'
+```
+
+```json
+{
+  "success": true,
+  "plan_id": 187,
+  "plan": {
+    "plan_type": "analytical",
+    "status": "ok",
+    "targeted_soft_skill": "time_management",
+    "learning_style_applied": "visual",
+    "summary": "Refuerzo en consultas SQL avanzadas con enfoque en gestión del tiempo.",
+    "weeks": [
+      {
+        "week_number": 1,
+        "focus": "JOINs y subconsultas",
+        "days": [
+          {
+            "day": 1,
+            "technical_activity": {
+              "title": "Práctica de INNER JOIN",
+              "description": "Resuelve 3 consultas con INNER JOIN sobre la base de datos de ejemplo.",
+              "duration_minutes": 45
+            },
+            "soft_skill_activity": {
+              "title": "Técnica Pomodoro",
+              "description": "Divide la sesión en bloques de 25 minutos con descansos de 5.",
+              "duration_minutes": 20,
+              "skill": "time_management"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "plan_type": "analytical",
+    "coder_id": 42,
+    "module_id": 3,
+    "module_name": "Bases de Datos",
+    "current_week": 2,
+    "execution_ms": 3241
+  }
+}
+```
+
+### Supabase operations
+
+The endpoint performs the following database writes on every successful request:
+
+| Operation | Table | Details |
+|-----------|-------|---------|
+| Deactivate old plans | `complementary_plans` | Sets `is_active = false` for all active plans belonging to the coder |
+| Insert new plan | `complementary_plans` | Stores the full plan JSON, soft skills snapshot, Moodle status snapshot, and targeted soft skill |
+| Insert activities | `plan_activities` | Up to 2 rows per day (technical + soft skill), up to 40 rows per plan |
+| Log generation | `ai_generation_log` | Records agent type, input/output payloads, model name, execution time, and success flag |

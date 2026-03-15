@@ -1,0 +1,102 @@
+---
+title: "AI Tutor"
+description: "Kairo's chat-based AI tutor that answers programming questions using Groq llama-3.3-70b-versatile."
+---
+
+The AI tutor is a chat interface available to coders on the `IAtrainer.html` page. It answers programming and conceptual questions in a concise, motivating, and practical way — giving a short answer first, then elaborating if needed.
+
+The tutor is powered by the Groq inference API using the `llama-3.3-70b-versatile` model (configurable via the `MODEL_NAME` environment variable).
+
+## Tutor persona
+
+The system prompt defines the tutor's behavior:
+
+> You are Kairo, an expert coding tutor at Riwi bootcamp. You help students with programming questions in a concise, motivating, and practical way. Always give a short answer first, then explain if needed. Use simple language. Max 3 paragraphs.
+
+Response constraints enforced by the system:
+
+- Maximum **3 paragraphs** per reply
+- Maximum **600 tokens** per response
+- Temperature **0.7** — balanced between creativity and precision
+
+## Chat interface
+
+The chat widget lives on `coder/IAtrainer.html`. It calls the Python service's `/chat/ask` endpoint directly (or via the Node proxy, depending on deployment configuration).
+
+## API reference
+
+### Send a message
+
+```
+POST /chat/ask
+```
+
+This endpoint is served by the Python FastAPI service. It does not require authentication — `coder_id` is accepted but optional and currently used only for logging purposes.
+
+**Request body**
+
+<ParamField body="message" type="string" required>
+  The coder's question or message. Cannot be empty or whitespace-only.
+</ParamField>
+
+<ParamField body="coder_id" type="integer">
+  The coder's user ID. Optional. Included for future personalization and usage tracking.
+</ParamField>
+
+**Example request**
+
+```json
+{
+  "message": "What is the difference between an INNER JOIN and a LEFT JOIN in SQL?",
+  "coder_id": 42
+}
+```
+
+**Example response**
+
+```json
+{
+  "reply": "An INNER JOIN returns only rows that have matching values in both tables. A LEFT JOIN returns all rows from the left table plus matching rows from the right — if there's no match, the right-side columns are NULL.\n\nUse INNER JOIN when you only want records that exist in both tables. Use LEFT JOIN when you need all records from the left table regardless of whether a match exists.\n\nFor example: `SELECT u.name, o.total FROM users u LEFT JOIN orders o ON u.id = o.user_id` will include users who have never placed an order, with NULL in the total column."
+}
+```
+
+**Error responses**
+
+| Status | Condition |
+|---|---|
+| `400` | Message is empty or only whitespace |
+| `500` | Groq API call failed or is temporarily unavailable |
+
+<Warning>
+  If the Groq API key is not set in the environment (`GROQ_API_KEY`), every request will return a 500 error. Verify the key is present in the Python service's environment before testing the tutor.
+</Warning>
+
+## Implementation
+
+The endpoint is defined in `backend-python/app/routers/chat.py`:
+
+```python
+@router.post("/chat/ask")
+async def ask_tutor(req: ChatRequest):
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    response = client.chat.completions.create(
+        model=os.getenv("MODEL_NAME", "llama-3.3-70b-versatile"),
+        messages=[
+            {"role": "system", "content": "..."},
+            {"role": "user",   "content": req.message},
+        ],
+        max_tokens=600,
+        temperature=0.7,
+    )
+    return {"reply": response.choices[0].message.content}
+```
+
+Each call creates a fresh Groq client and sends a two-message conversation: the fixed system prompt followed by the user's message. There is no conversation history — each request is stateless.
+
+<Note>
+  The tutor does not maintain conversation history between requests. Each call to `/chat/ask` is independent. If your use case requires multi-turn context, you must include prior messages in the `message` field.
+</Note>
+
+## Rate limiting
+
+The `/chat/ask` endpoint has no application-level rate limiting implemented. The effective limit is determined by your Groq API plan's tokens-per-minute and requests-per-minute quotas. Monitor usage in the Groq console if you expect high concurrent traffic from multiple coders.

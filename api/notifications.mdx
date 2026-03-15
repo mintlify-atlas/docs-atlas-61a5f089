@@ -1,0 +1,164 @@
+---
+title: "Notifications API"
+description: "Real-time SSE stream and REST endpoints for user notifications: list, mark as read, delete."
+---
+
+<Info>
+  All endpoints in this group require authentication. Notifications are scoped to the authenticated user — you can only read and manage your own notifications.
+</Info>
+
+Notifications are created server-side when events occur (TL submits feedback, a resource is uploaded, a TL reviews an exercise submission, etc.). They are delivered in real-time via the SSE stream and are also available via the REST polling endpoint.
+
+## GET /api/notifications/stream
+
+<Info>Requires authentication</Info>
+
+Opens a persistent Server-Sent Events (SSE) connection for the authenticated user. The server pushes notification events in real time as they are created. The connection stays open until the client disconnects.
+
+<Warning>
+  This is a long-lived HTTP connection. Do not call it via `fetch` or `curl` in a standard request-response style. Use the browser `EventSource` API or an SSE client library.
+</Warning>
+
+**Response headers**
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `text/event-stream` |
+| `Cache-Control` | `no-cache` |
+| `Connection` | `keep-alive` |
+| `X-Accel-Buffering` | `no` (required for Railway/nginx proxies) |
+
+**Event format**
+
+Events are sent as newline-delimited JSON in the SSE `data` field:
+
+```
+data: {"type":"CONNECTED"}
+
+data: {"type":"NOTIFICATION","id":42,"title":"Nuevo Feedback","message":"...","notifType":"feedback","relatedId":7}
+
+```
+
+The first event is always `{"type": "CONNECTED"}`, confirming the connection is established.
+
+**Browser example**
+
+```javascript
+const source = new EventSource('/api/notifications/stream', { withCredentials: true });
+
+source.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === 'NOTIFICATION') {
+    console.log('New notification:', data.title);
+  }
+};
+
+source.onerror = () => {
+  source.close();
+};
+```
+
+---
+
+## GET /api/notifications
+
+<Info>Requires authentication</Info>
+
+Returns the 30 most recent notifications for the authenticated user, along with an unread count.
+
+**Response — 200 OK**
+
+<ResponseField name="notifications" type="array">
+  Up to 30 notification records ordered by `createdAt` descending. Each object contains:
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">Notification ID.</ResponseField>
+    <ResponseField name="title" type="string">Short notification title.</ResponseField>
+    <ResponseField name="message" type="string">Full notification message body.</ResponseField>
+    <ResponseField name="type" type="string">Notification category (e.g., `feedback`, `assignment`, `feedback_read`).</ResponseField>
+    <ResponseField name="is_read" type="boolean">`true` if the user has marked this notification as read.</ResponseField>
+    <ResponseField name="related_id" type="number | null">ID of the related entity (submission, feedback item, resource, etc.).</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 creation timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="unread" type="number">
+  Count of notifications with `is_read = false`.
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `500 Internal Server Error` | Database error |
+
+**Example**
+
+```bash
+curl http://localhost:3000/api/notifications -b cookies.txt
+```
+
+---
+
+## POST /api/notifications/read
+
+<Info>Requires authentication</Info>
+
+Marks all unread notifications for the authenticated user as read in a single operation.
+
+**Request body**
+
+None.
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` when the update completed.
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `500 Internal Server Error` | Database error |
+
+**Example**
+
+```bash
+curl -X POST http://localhost:3000/api/notifications/read -b cookies.txt
+```
+
+---
+
+## DELETE /api/notifications/:id
+
+<Info>Requires authentication</Info>
+
+Permanently deletes a single notification. The notification must belong to the authenticated user.
+
+**Path parameters**
+
+<ParamField path="id" type="number" required>
+  ID of the notification to delete.
+</ParamField>
+
+**Response — 200 OK**
+
+<ResponseField name="success" type="boolean">
+  `true` on successful deletion.
+</ResponseField>
+
+**Error responses**
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | No active session |
+| `404 Not Found` | Notification not found or belongs to a different user |
+| `500 Internal Server Error` | Database error |
+
+**Example**
+
+```bash
+curl -X DELETE http://localhost:3000/api/notifications/42 -b cookies.txt
+```
